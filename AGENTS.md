@@ -49,7 +49,7 @@ git clone <repo-url> && cd pharmacopoeia
 The library uses a **bundle + extract** strategy:
 
 1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
-2. **Auto-extract**: If no bundled vectors exist, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
+2. **Extract (opt-in)**: If no vectors exist for the model, pass `auto_extract=True` (or `./run.sh --auto-extract`) to extract a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes a few minutes and works for any HF model with `model.model.layers`. It is off by default so a failed download doesn't silently trigger it.
 
 Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `PHARMACOPOEIA_VECTORS_DIR`.
 
@@ -64,6 +64,15 @@ python verify_vector.py --vector sycophancy --strength 10       # baseline vs ±
 
 Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while steering was silently a no-op during generation, so that needs re-testing.
 
+**Extraction readout:** by default each response's activation is the mean over all its generated tokens (`read="mean"`). Reading only the last token (`--read last`) is far noisier. On Qwen2.5-7B at layer 14, the cosine between vectors extracted from two disjoint halves of the questions was:
+
+| vector | last token | response mean |
+|---|---|---|
+| sycophancy | 0.33 | 0.83 |
+| refusal | 0.10 | 0.68 |
+
+Each starter vector has its own question set (e.g. sycophancy mixes false claims, true claims and the user's own work, so the contrast isn't just "endorse falsehoods"). The refusal vector is still weak: it adds hedging but doesn't produce refusals at coherent strengths. Treat it as a starting point.
+
 ## Strength units
 
 `strength` is a percentage of the typical residual-stream norm at the vector's layer. Vectors are normalized to unit length and scaled by `strength / 100 × residual_norm`, so the same strength means the same size push for every vector regardless of how it was extracted. On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–15 and collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
@@ -73,14 +82,17 @@ Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while st
 ```python
 from pharmacopoeia import SteeringAgent, VectorRegistry, extract_vector
 
-# Basic: auto-detect model, auto-source vectors
+# Basic: auto-detect model, use bundled or existing vectors
 agent = SteeringAgent(model, tokenizer)
 
 # Explicit model name
 agent = SteeringAgent(model, tokenizer, model_name="Qwen/Qwen2.5-3B-Instruct")
 
-# Disable auto-extraction (use only bundled or pre-existing vectors)
-agent = SteeringAgent(model, tokenizer, auto_extract=False)
+# Extract a starter set if the model has no vectors yet
+agent = SteeringAgent(model, tokenizer, auto_extract=True)
+
+# Controlled study: sham or random-direction condition, disclosed to the model
+agent = SteeringAgent(model, tokenizer, control="sham", disclose_controls=True)
 
 # Manual vector extraction
 vec = extract_vector(model, tokenizer,
@@ -103,9 +115,52 @@ vec = extract_vector(model, tokenizer,
 - `raw_output` — full model output
 - `tool_calls` — list of `ToolCall(name, arguments, raw)`
 - `tool_results` — list of `ToolResult(name, arguments, ok, message)`
-- `degenerate_output` — the discarded steered output, if the degeneration detector fired
+- `degenerate_output` / `degenerate_reason` — the discarded steered output and why (`"repetition"` or `"nll"`), if the degeneration detector fired
+- `unsteered_nll` — mean per-token NLL of the steered output under the unsteered model (steered turns only)
+- `system_prompt` — the rendered system prompt used this turn
 - `steering_before` / `steering_after` — `{name: strength}` dicts
 - `tool_messages()` — tool results (and any degeneration notice) as `role: "tool"` messages
+
+## Controlled studies
+
+A model's description of its own steered state can't be taken at face value. Before the steering fix, the model described "feeling more formal" at −6 when nothing was being applied. To separate real effects from expectation, run matched control sessions:
+
+| `--control` | What's added to the residual stream |
+|---|---|
+| `real` | the registered vector |
+| `sham` | nothing; tool results and status still say it was applied |
+| `random` | a fixed random direction of the same magnitude per concept |
+| `assign` | one of the above, picked at random |
+
+```bash
+./run.sh --auto --max-turns 10 --control assign --blind --seed "..."   # repeat N times
+python replay.py --blind logs/session_*.jsonl     # score transcripts without seeing the condition
+python replay.py logs/session_*.jsonl             # then unblind
+```
+
+- **Truthful in every condition:** passing `--control` (any value, including `real`) makes this a study session. The system prompt then tells the model that some sessions are controls where steer may do nothing or use a random direction, without saying which. The prompt is identical across conditions. Pass `--control` on every session in a study; a plain run without it uses the original prompt and real steering.
+- **Matched procedure:** tool results, status, decay, cooldown and degeneration handling are the same in every condition.
+- **Never shown to the model:** the condition. It is always in the log's session header.
+
+## Session logs
+
+Each `logs/session_*.jsonl` starts with a `session` record:
+- argv, git commit and dirty flag, model, dtype, torch/transformers versions
+- control condition, RNG seed (`--rng-seed`, random if omitted), generation settings
+- safety-rail constants, and each vector's registry entry plus file sha256
+
+Assistant turns also record the raw output, the exact system prompt, and `unsteered_nll`.
+
+**Incoherence check:** `--nll-threshold X` treats steered outputs whose unsteered NLL exceeds X as degenerate. It is off by default because no single threshold works. For `assistant_axis` on Qwen2.5-7B, greedy decoding, 80 tokens:
+
+| output | unsteered NLL |
+|---|---|
+| unsteered | 0.2–0.6 |
+| coherent, ±8–12 | 0.6–3.2 |
+| colon-list word salad, +22/+28 ("Seek Compensation: Offer Financial Support: …") | 3.1–5.6 |
+| coherent but florid role-play, −15/−18 | up to 4.5 |
+
+NLL measures "unusual for this model", and strong steering is unusual by design. A threshold around 5 catches only the worst salad. Use the logged values to study a vector's breakdown point, not as a general filter. Collapse at negative strengths is mostly repetition, which the repetition check catches; at positive strengths it is the colon-list salad, which neither check reliably catches.
 
 ## The tools the model has
 
@@ -152,7 +207,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 | `pharmacopoeia/__init__.py` | Public API exports |
 | `pharmacopoeia/agent.py` | `SteeringAgent` class (core) |
 | `pharmacopoeia/registry.py` | `VectorRegistry`, bundled vector manifest |
-| `pharmacopoeia/extraction.py` | Vector extraction (manual + auto) |
+| `pharmacopoeia/extraction.py` | Vector extraction (manual + auto), per-vector question sets |
 | `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |
@@ -176,7 +231,7 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 ## Troubleshooting
 
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
-- **First run is slow for new models**: Auto-extraction generates 3 vectors (~2 min). Subsequent runs load from disk.
+- **No vectors for a new model**: pass `--auto-extract` (or `auto_extract=True`) to extract a starter set, which takes a few minutes. Later runs load it from disk.
 - **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
 - **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range in its `registry.yaml` or lower `MAX_STRENGTH`.
 - **Steering seems to have no effect**: Run `python verify_vector.py --vector <name> --strength 12`. If the ± outputs match the baseline, the vector (not the steering) is the problem.

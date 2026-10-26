@@ -26,7 +26,11 @@ messages += result.tool_messages()  # tool results back to the model
 
 ## How vectors are sourced
 
-**Bundle + extract**: precomputed vectors are auto-downloaded for known models (currently Qwen2.5-7B-Instruct). For unknown models, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min).
+**Bundle + extract**: precomputed vectors are auto-downloaded for known models (currently Qwen2.5-7B-Instruct). For other models, pass `auto_extract=True` (or `./run.sh --auto-extract`) to extract a starter set (sycophancy, refusal, creativity) using contrastive system prompts.
+
+## Controlled studies
+
+Self-reports about steering need a baseline. `./run.sh --control assign --blind` randomly runs real, sham (nothing applied), or random-direction steering, and tells the model truthfully that some sessions are controls. `python replay.py --blind` lets you score transcripts before unblinding. See [AGENTS.md](AGENTS.md#controlled-studies).
 
 ## Requirements
 
