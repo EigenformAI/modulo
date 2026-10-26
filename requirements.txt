@@ -8,3 +8,4 @@ huggingface_hub
 numpy
 pyyaml
 torch>=2.4
+pytest

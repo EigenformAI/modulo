@@ -7,4 +7,5 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+if [ -d /workspace ]; then export HF_HOME="${HF_HOME:-/workspace/hf_cache}"; fi
 exec python3 -m agent.loop "$@"

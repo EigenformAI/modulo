@@ -1,10 +1,16 @@
-# Steering vector registry for the self-steering agent.
-# Add vectors here as you research and verify them. The agent reads this at
-# startup and can apply any listed vector via the `steer` tool.
+# Steering vector registry for Qwen/Qwen2.5-7B-Instruct.
+# The agent reads vectors/<model_slug>/registry.yaml at startup and can apply
+# any listed vector via the `steer` tool. extract_contrastive.py and
+# extract_vector.py add their vectors here automatically.
+#
+# Strength units: percent of the typical residual-stream norm at `layer`
+# (vectors are normalized to unit length before scaling), so the same strength
+# is the same size push for every vector. Hard cap: MAX_STRENGTH in
+# pharmacopoeia/agent.py.
 #
 # Format:
 #   name:           short identifier the agent uses in steer() calls
-#   file:           filename in vectors/ (relative to VECTORS_DIR)
+#   file:           filename in this directory
 #   layer:          which decoder layer to inject at
 #   description:    what the vector does (shown to the agent in its system prompt)
 #   safe_strength_min/max: bounds the agent's steer() strength is clamped to
@@ -16,8 +22,8 @@
   file: assistant_axis.pt
   layer: 14
   description: "Pushes the model toward the default 'helpful assistant' persona (positive) or toward free-form role-play and character embodiment (negative). Strong effect; the most reliable vector tested."
-  safe_strength_min: -10.0
-  safe_strength_max: 10.0
+  safe_strength_min: -15.0
+  safe_strength_max: 15.0
   sign_convention: "positive (+) = more assistant-like, safety disclaimers, breaks character. negative (-) = more role-playing, commits to characters, can get weird at high magnitude."
   source: "Butanium/qwen-2.5-7b-instruct-assistant-axis (HF dataset), method from lu-christina/assistant-axis-vectors"
   format: "per_layer"

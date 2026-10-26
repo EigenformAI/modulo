@@ -9,13 +9,14 @@ Public API:
 
 Quick start:
     from pharmacopoeia import SteeringAgent
-    agent = SteeringAgent(model, tokenizer)  # any HF causal LM
-    # agent now has .step(messages) -> (prose, tool_calls, raw_output)
-    # and .build_system_prompt() for the steer tool description
+    agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers
+    result = agent.step(messages)            # -> StepResult
+    messages += [{"role": "assistant", "content": result.raw_output}]
+    messages += result.tool_messages()       # tool results back to the model
 """
 from pharmacopoeia.agent import SteeringAgent
 from pharmacopoeia.registry import VectorRegistry, VectorEntry
-from pharmacopoeia.extraction import extract_vector, extract_auto
+from pharmacopoeia.extraction import extract_vector, extract_auto, save_and_register
 
 __version__ = "0.1.0"
 
@@ -25,4 +26,5 @@ __all__ = [
     "VectorEntry",
     "extract_vector",
     "extract_auto",
+    "save_and_register",
 ]

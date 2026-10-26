@@ -16,7 +16,7 @@ hf_cache/
 *.bin
 *.safetensors
 # Keep the assistant_axis.pt vector (it's only ~200KB and needed)
-!vectors/assistant_axis.pt
+!vectors/Qwen_Qwen2.5-7B-Instruct/assistant_axis.pt
 
 # Extracted activation dumps
 vectors/*_activations/

@@ -1,9 +1,8 @@
 """Load the model + tokenizer once, with a sanity forward pass."""
-import sys
+import config  # sets HF_HOME; must come before transformers is imported
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-import config
 
 
 def load_model_and_tokenizer():
@@ -12,7 +11,7 @@ def load_model_and_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
         config.MODEL_NAME,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map=config.DEVICE_MAP,
     )
     model.eval()

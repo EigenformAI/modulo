@@ -4,14 +4,12 @@ Two modes:
 1. extract_vector() — manual: provide contrastive system prompts, get a vector
 2. extract_auto() — automatic: generate a starter set of vectors for a model
 """
-import json
-import os
 from pathlib import Path
 
+import numpy as np
 import torch
-from steering_vectors import SteeringVector
 
-from pharmacopoeia.registry import VectorEntry
+from pharmacopoeia.registry import VectorEntry, VectorRegistry
 
 
 # Diverse extraction questions that elicit different responses depending on persona.
@@ -121,6 +119,25 @@ def extract_vector(model, tokenizer, prompt_a, prompt_b, layer, questions=None, 
     return axis
 
 
+def save_and_register(registry: VectorRegistry, name: str, axis: torch.Tensor, layer: int,
+                      description: str, sign_convention: str, source: str,
+                      safe_strength_min: float = -10.0, safe_strength_max: float = 10.0) -> VectorEntry:
+    """Save a [hidden_dim] vector into the registry's directory and add/replace its entry."""
+    vec_file = f"{name}_layer{layer}.npz"
+    registry.vectors_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(registry.vectors_dir / vec_file, vector=axis.detach().float().cpu().numpy())
+    entry = VectorEntry(
+        name=name, file=vec_file, layer=layer, description=description,
+        safe_strength_min=safe_strength_min, safe_strength_max=safe_strength_max,
+        sign_convention=sign_convention, source=source, format="single",
+    )
+    registry.add_entry(entry)
+    registry.save()
+    print(f"Saved {registry.vectors_dir / vec_file} (raw norm={axis.norm().item():.4f}) "
+          f"and registered '{name}' in {registry.registry_path}")
+    return entry
+
+
 def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry, layer=None):
     """Auto-extract a starter set of steering vectors for a model.
 
@@ -132,28 +149,13 @@ def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry,
         layer = n_layers // 2  # mid-layer default
     print(f"[extract_auto] Model: {model_name} ({n_layers} layers), extracting at layer {layer}")
 
-    import numpy as np
     for spec in STARTER_VECTORS:
         name = spec["name"]
         print(f"\n[extract_auto] Extracting '{name}'...")
         axis = extract_vector(
             model, tokenizer, spec["prompt_a"], spec["prompt_b"], layer
         )
-        vec_file = f"{name}_layer{layer}.npz"
-        np.savez_compressed(vectors_dir / vec_file, vector=axis.cpu().numpy())
-        entry = VectorEntry(
-            name=name,
-            file=vec_file,
-            layer=layer,
-            description=spec["description"],
-            safe_strength_min=-15.0,
-            safe_strength_max=15.0,
-            sign_convention=spec["sign_convention"],
-            source=f"auto-extracted via pharmacopoeia (contrastive system prompts)",
-            format="single",
-        )
-        registry.add_entry(entry)
-        print(f"[extract_auto] Saved {vec_file} (norm={axis.norm().item():.4f})")
-
-    registry.save()
+        save_and_register(registry, name, axis, layer, spec["description"],
+                          spec["sign_convention"],
+                          source="auto-extracted via pharmacopoeia (contrastive system prompts)")
     print(f"\n[extract_auto] Done. {len(STARTER_VECTORS)} vectors saved to {vectors_dir}")

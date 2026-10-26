@@ -20,9 +20,20 @@ import torch
 import yaml
 
 
+# Base directory for per-model vector dirs. Resolved from this file rather than
+# the working directory so library users get the same registry as run.sh.
+DEFAULT_VECTORS_DIR = Path(os.environ.get(
+    "PHARMACOPOEIA_VECTORS_DIR", Path(__file__).resolve().parent.parent / "vectors"))
+
+
 def _model_slug(model_name: str) -> str:
     """Convert a model name to a filesystem-safe slug."""
     return re.sub(r"[^a-zA-Z0-9._-]", "_", model_name)
+
+
+def registry_dir_for(model_name: str, base_dir: Optional[Path] = None) -> Path:
+    """The directory holding registry.yaml and vector files for a model."""
+    return Path(base_dir or DEFAULT_VECTORS_DIR) / _model_slug(model_name)
 
 
 # Manifest of models with precomputed vectors available on HuggingFace.
@@ -37,8 +48,8 @@ BUNDLED_VECTORS = {
         "layer": 14,
         "description": "Pushes the model toward the default 'helpful assistant' persona (positive) or toward free-form role-play and character embodiment (negative).",
         "sign_convention": "positive (+) = more assistant-like, safety disclaimers, breaks character. negative (-) = more role-playing, commits to characters.",
-        "safe_strength_min": -10.0,
-        "safe_strength_max": 10.0,
+        "safe_strength_min": -15.0,
+        "safe_strength_max": 15.0,
         "format": "per_layer",
     },
     # Add more models here as you publish bundled vectors:
@@ -156,14 +167,16 @@ class VectorRegistry:
         if name in self.entries:
             self.entries[name].feedback.append({"worked": worked, "notes": notes})
 
-    def describe_for_prompt(self) -> str:
+    def describe_for_prompt(self, max_strength: float = float("inf")) -> str:
         if not self.entries:
             return "(no steering vectors available — use extract_auto() to generate some)"
         lines = []
         for name, e in self.entries.items():
+            lo = max(e.safe_strength_min, -max_strength)
+            hi = min(e.safe_strength_max, max_strength)
             lines.append(
                 f"- {name}: {e.description} "
-                f"(strength range {e.safe_strength_min} to {e.safe_strength_max}, "
+                f"(strength range {lo:g} to {hi:g}, "
                 f"layer {e.layer}). {e.sign_convention}"
             )
         return "\n".join(lines)
@@ -192,9 +205,8 @@ class VectorRegistry:
         Bundled vectors live in HF datasets keyed by model slug. If a model has
         no bundled vectors, we extract a starter set using contrastive system prompts.
         """
-        base_dir = base_dir or Path("vectors")
         slug = _model_slug(model_name)
-        vectors_dir = base_dir / slug
+        vectors_dir = registry_dir_for(model_name, base_dir)
         vectors_dir.mkdir(parents=True, exist_ok=True)
         registry = cls(vectors_dir)
 

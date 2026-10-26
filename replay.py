@@ -8,6 +8,13 @@ import sys
 from pathlib import Path
 
 
+def _ok(e):
+    # Logs from before the fix have no real success info (it was always True)
+    if "message" not in e:
+        return "?"
+    return "OK" if e.get("success") else "FAIL"
+
+
 def replay(log_path: str):
     events = []
     with open(log_path) as f:
@@ -19,8 +26,8 @@ def replay(log_path: str):
         t = e.get("type")
         turn = e.get("turn", "?")
         if t == "turn":
-            role = e["role"]
-            content = e["content"]
+            role = e.get("role", "?")
+            content = e.get("content") or ""
             calls = e.get("tool_calls", [])
             steer_before = e.get("steering_before", {})
             steer_after = e.get("steering_after", {})
@@ -30,15 +37,17 @@ def replay(log_path: str):
             if steer_before or steer_after:
                 print(f"       steering: {steer_before} -> {steer_after}")
         elif t == "steer":
-            print(f"[T{turn}] STEER: {e['concept']} @ {e['strength']} -> {'OK' if e['success'] else 'FAIL'} ({e['message']})")
+            print(f"[T{turn}] STEER: {e.get('concept')} @ {e.get('strength')} -> {_ok(e)} ({e.get('message', '')})")
         elif t == "drop":
-            print(f"[T{turn}] DROP: {e['concept']} -> {'OK' if e['success'] else 'FAIL'} ({e['message']})")
+            print(f"[T{turn}] DROP: {e.get('concept')} -> {_ok(e)} ({e.get('message', '')})")
         elif t == "report":
-            print(f"[T{turn}] REPORT: {e['concept']} worked={e['worked']} — {e['notes']}")
+            print(f"[T{turn}] REPORT: {e.get('concept')} worked={e.get('worked')} — {e.get('notes')}")
+        elif t == "tool_error":
+            print(f"[T{turn}] TOOL ERROR: {e.get('name')} — {e.get('message', '')}")
         elif t == "decay":
-            print(f"[T{turn}] DECAY: {e['active_vectors']}")
+            print(f"[T{turn}] DECAY: {e.get('active_vectors')}")
         elif t == "degeneration":
-            print(f"[T{turn}] DEGENERATION DETECTED: {e['snippet'][:100]}...")
+            print(f"[T{turn}] DEGENERATION DETECTED (dropped {e.get('dropped', '?')}): {e.get('snippet', '')[:100]}...")
         print()
 
 
