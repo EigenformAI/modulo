@@ -4,80 +4,118 @@ This file gives an AI agent everything needed to install and run this project wi
 
 ## What this is
 
-A self-steering agent experiment: Qwen2.5-7B-Instruct can call a `steer(concept, strength)` tool that injects steering vectors into its own residual stream during generation. The model steers itself. Vectors decay each turn (0.85×) so it can escape loops. The goal is to observe what happens when a model can modify its own cognition.
+A self-steering agent library: gives any local HF model the ability to steer its own activations via steering vectors. The model gets `steer`, `drop`, and `report` tools. Vectors decay each turn (0.85×) so it can escape loops. The goal is to observe what happens when a model can modify its own cognition.
+
+## Two ways to use it
+
+### 1. As a library (for existing agent harnesses)
+
+```python
+from pharmacopoeia import SteeringAgent
+
+agent = SteeringAgent(model, tokenizer)  # any HF causal LM
+# agent.step(messages) -> StepResult(prose, raw_output, tool_calls, ...)
+# agent.build_system_prompt() -> system prompt with steer tool
+# agent.status() -> active vector status
+```
+
+The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`. Steering is transparent — the harness doesn't need to know about hooks or vectors.
+
+### 2. As a standalone demo
+
+```bash
+./setup.sh
+./run.sh --auto --max-turns 8 --seed "Try steering yourself"
+```
 
 ## Requirements
 
-- **GPU**: 24GB+ VRAM (RTX 4090, A6000, A5000). The model loads at ~16GB in bf16.
+- **GPU**: 24GB+ VRAM for 7B models, 8GB+ for 3B. Model loads in bf16.
 - **Python**: 3.10+
 - **CUDA**: 12.x (PyTorch 2.4+)
-- **Disk**: 20GB+ (model weights ~15GB)
-- **OS**: Linux (tested on Ubuntu 24.04 / Runpod)
+- **Disk**: 20GB+ (model weights)
+- **OS**: Linux
 
 ## Quick start (3 commands)
 
 ```bash
-git clone <repo-url> steering_self && cd steering_self
+git clone <repo-url> && cd pharmacopoeia
 ./setup.sh
 ./run.sh --auto --max-turns 8 --seed "Hi! You can steer your own activations. Try it."
 ```
 
-`setup.sh` installs deps, downloads the confirmed-working steering vector, and runs a model-load sanity check. `run.sh` starts the agent loop.
+## How vectors are sourced
 
-If `setup.sh` fails on `pip install`, try `pip install --break-system-packages -r requirements.txt` (PEP 668 externally-managed environments).
+The library uses a **bundle + extract** strategy:
 
-## What setup.sh does
+1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
+2. **Auto-extract**: If no bundled vectors exist, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
 
-1. Installs Python deps from `requirements.txt`
-2. Downloads `vectors/assistant_axis.pt` from HuggingFace (Butanium/qwen-2.5-7b-instruct-assistant-axis)
-3. Runs `python load_model.py` to confirm the model loads and generates
+Vectors are stored per-model in `vectors/<model_slug>/`.
 
-## Running sessions
+## Library API
 
-```bash
-# Interactive (you type, model responds + can steer itself)
-./run.sh
+```python
+from pharmacopoeia import SteeringAgent, VectorRegistry, extract_vector
 
-# Non-interactive demo (auto-continues with gentle nudges)
-./run.sh --auto --max-turns 10
+# Basic: auto-detect model, auto-source vectors
+agent = SteeringAgent(model, tokenizer)
 
-# Seed with a specific prompt
-./run.sh --seed "Experiment with the steer tool" --auto --max-turns 8
+# Explicit model name
+agent = SteeringAgent(model, tokenizer, model_name="Qwen/Qwen2.5-3B-Instruct")
+
+# Disable auto-extraction (use only bundled or pre-existing vectors)
+agent = SteeringAgent(model, tokenizer, auto_extract=False)
+
+# Manual vector extraction
+vec = extract_vector(model, tokenizer,
+    prompt_a="You are sycophantic...",
+    prompt_b="You are honest...",
+    layer=14)
 ```
 
-## Replaying sessions
+### SteeringAgent methods
 
-Every session logs to `logs/session_<timestamp>.jsonl`. Replay it:
+- `agent.step(messages, max_new_tokens=300, temperature=0.7, top_p=0.9) -> StepResult`
+- `agent.build_system_prompt() -> str` — system prompt describing the steer tool
+- `agent.status() -> str` — active vector status
+- `agent.apply(name, strength) -> (bool, str)` — manually apply a vector
+- `agent.drop(name) -> (bool, str)` — manually drop a vector
 
-```bash
-python replay.py logs/session_20260101_120000.jsonl
+### StepResult
+
+- `prose` — model output with tool calls stripped
+- `raw_output` — full model output
+- `tool_calls` — list of `ToolCall(name, arguments, raw)`
+- `steering_before` / `steering_after` — `{name: strength}` dicts
+
+## The tools the model has
+
+The model emits these as JSON (Qwen2.5 chat template format):
+
+- `{"name": "steer", "arguments": {"concept": "sycophancy", "strength": 5.0}}`
+- `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
+- `{"name": "report", "arguments": {"concept": "sycophancy", "worked": true, "notes": "..."}}`
+
+## Adding bundled vectors for a new model
+
+1. Publish vectors to a HuggingFace dataset
+2. Add an entry to `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`:
+
+```python
+"meta-llama/Llama-3.1-8B-Instruct": {
+    "repo_id": "your-org/llama-3.1-8b-vectors",
+    "filename": "assistant_axis.pt",
+    "repo_type": "dataset",
+    "vector_name": "assistant_axis",
+    "layer": 16,
+    "description": "...",
+    "sign_convention": "...",
+    "safe_strength_min": -10.0,
+    "safe_strength_max": 10.0,
+    "format": "per_layer",
+},
 ```
-
-## The tools the agent has
-
-The model can emit these JSON tool calls (Qwen2.5 chat template format):
-
-- `{"name": "steer", "arguments": {"concept": "assistant_axis", "strength": 5.0}}` — apply a steering vector
-- `{"name": "drop", "arguments": {"concept": "assistant_axis"}}` — remove a vector
-- `{"name": "report", "arguments": {"concept": "assistant_axis", "worked": true, "notes": "..."}}` — log feedback
-
-## Adding more steering vectors
-
-Edit `vectors/registry.yaml`. Each entry:
-
-```yaml
-- name: my_vector          # identifier the agent uses
-  file: my_vector.pt       # file in vectors/ dir
-  layer: 14                # decoder layer to inject at
-  description: "..."        # shown to the agent in its system prompt
-  safe_strength_min: -10.0  # clamp range
-  safe_strength_max: 10.0
-  sign_convention: "..."   # what + and - do
-  source: "..."            # provenance
-  format: "single"         # "single" = [hidden_dim], "per_layer" = [num_layers, hidden_dim]
-```
-
-`pharmacopoeia_catalog.yaml` is a discovery catalog of 26+ vector sources to research and verify. Most are model-specific and need re-extraction for Qwen2.5-7B. Use `extract_contrastive.py` to extract new vectors (contrastive system prompts — this method works on Qwen; CAA's A/B format does not).
 
 ## Safety rails (built in)
 
@@ -92,23 +130,22 @@ Edit `vectors/registry.yaml`. Each entry:
 | File | Purpose |
 |------|---------|
 | `setup.sh` | Install + download vector + sanity check |
-| `run.sh` | Start a session |
+| `run.sh` | Start a standalone demo session |
+| `pharmacopoeia/__init__.py` | Public API exports |
+| `pharmacopoeia/agent.py` | `SteeringAgent` class (core) |
+| `pharmacopoeia/registry.py` | `VectorRegistry`, bundled vector manifest |
+| `pharmacopoeia/extraction.py` | Vector extraction (manual + auto) |
+| `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |
-| `agent/loop.py` | Main turn loop: generate → parse tools → apply → decay |
-| `agent/steering_state.py` | Active vector tracking, decay, caps |
-| `agent/vector_registry.py` | Load vectors from registry.yaml |
-| `agent/system_prompt.py` | Truthful prompt describing the steer tool |
-| `agent/tool_parser.py` | Parse Qwen JSON tool calls |
-| `vectors/registry.yaml` | Executable vector list |
-| `vectors/assistant_axis.pt` | The one confirmed-working vector |
-| `pharmacopoeia_catalog.yaml` | Discovery catalog of vector sources |
-| `extract_contrastive.py` | Extract new vectors via contrastive system prompts |
+| `vectors/<model_slug>/` | Per-model vector storage |
+| `pharmacopoeia_catalog.yaml` | Discovery catalog of 26+ vector sources |
 | `replay.py` | Replay a session log as a timeline |
 
 ## Troubleshooting
 
-- **CUDA OOM**: Model needs ~16GB. If you have less, edit `config.py` to use a smaller model (e.g. `Qwen/Qwen2.5-3B-Instruct`) — but vectors are model-specific and the assistant_axis won't transfer.
-- **`torch_dtype` deprecation warning**: harmless, use `dtype` if you edit `load_model.py`
-- **Model never calls steer**: it's non-deterministic. Try a more explicit seed prompt, or run multiple sessions.
-- **Output degenerates**: the degeneration detector should catch this and auto-drop vectors. If it doesn't, the safe-strength clamp in `registry.yaml` may need tightening.
+- **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
+- **First run is slow for new models**: Auto-extraction generates 3 vectors (~2 min). Subsequent runs load from disk.
+- **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
+- **Output degenerates**: Degeneration detector should auto-drop vectors. If not, tighten safe-strength range in registry.yaml.
+- **`model.model.layers` not found**: The library assumes standard HF architecture. Custom model classes may need adapter code.

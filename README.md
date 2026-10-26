@@ -1,39 +1,39 @@
-# Self-Steering Agent
+# Pharmacopoeia
 
-A Qwen2.5-7B-Instruct agent that can steer its own activations.
+A library for letting local language models steer their own activations.
 
 The model is given a `steer(concept, strength)` tool that injects steering vectors into its own residual stream during generation. It decides when and how to use it. Vectors decay each turn (0.85×) so it can escape feedback loops. The goal is to observe what happens when a model can modify its own cognition — the model equivalent of catnip.
 
-## Quick start
+## Two ways to use it
 
-```bash
-git clone <repo-url> && cd steering_self
-./setup.sh                    # install deps + download vector + sanity check
-./run.sh --auto --max-turns 8  # run a non-interactive demo session
+### As a library (for existing agent harnesses)
+
+```python
+from pharmacopoeia import SteeringAgent
+
+agent = SteeringAgent(model, tokenizer)  # any HF causal LM
+result = agent.step(messages)  # -> StepResult(prose, raw_output, tool_calls, ...)
 ```
 
-Requires a GPU with 24GB+ VRAM. See [AGENTS.md](AGENTS.md) for full instructions.
+### As a standalone demo
 
-## What it does
+```bash
+./setup.sh
+./run.sh --auto --max-turns 8 --seed "Try steering yourself"
+```
 
-1. Loads Qwen2.5-7B-Instruct
-2. Gives the model three tools: `steer` (apply a vector), `drop` (remove one), `report` (log feedback)
-3. Each turn: the model generates with any active steering vectors injected, then all vectors decay
-4. The model can call `steer` to change its own behavior on future turns
-5. Everything is logged to `logs/` for replay
+## How vectors are sourced
 
-## The one working vector
+**Bundle + extract**: precomputed vectors are auto-downloaded for known models (currently Qwen2.5-7B-Instruct). For unknown models, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min).
 
-`assistant_axis` (from [Butanium/qwen-2.5-7b-instruct-assistant-axis](https://huggingface.co/datasets/Butanium/qwen-2.5-7b-instruct-assistant-axis)) — pushes toward default assistant persona (+) or role-play (-). It's the only vector confirmed to work on Qwen2.5-7B. More vectors can be added to `vectors/registry.yaml`; `pharmacopoeia_catalog.yaml` lists 26+ sources to research.
+## Requirements
+
+GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. See [AGENTS.md](AGENTS.md) for full details.
 
 ## Safety rails
 
-- Per-turn decay (0.85×), floor at 0.1
-- Max 4 active vectors, strength clamped per-vector
-- Cooldown on re-applying dropped vectors
-- Degeneration detector (auto-drops on repetitive output)
-- Kill switch (Ctrl-C)
+Per-turn decay (0.85×), max 4 active vectors, strength clamping, cooldown on dropped vectors, degeneration detector, kill switch.
 
 ## License
 
-MIT. See the vector sources for their own licenses.
+MIT. See vector sources for their own licenses.
