@@ -163,6 +163,16 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 | `pharmacopoeia_catalog.yaml` | Discovery catalog of 26+ vector sources |
 | `replay.py` | Replay a session log as a timeline |
 
+## Tests
+
+```bash
+pytest                              # everything; GPU tests skip without CUDA
+pytest tests/test_agent_logic.py    # CPU only: parsing, decay/cooldown, degeneration, tool validation
+pytest tests/test_steering_gpu.py   # loads the model; checks steering really changes generation
+```
+
+Run the GPU tests after touching anything in the steering path (`_SteeringHooks`, `_build_steering_context`, vector loading). They exist because steering was once silently a no-op under KV-cached `generate()`.
+
 ## Troubleshooting
 
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
