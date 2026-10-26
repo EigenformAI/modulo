@@ -196,7 +196,7 @@ class VectorRegistry:
 
     @classmethod
     def for_model(cls, model_name: str, base_dir: Optional[Path] = None,
-                  auto_extract: bool = True, model=None, tokenizer=None) -> "VectorRegistry":
+                  auto_extract: bool = False, model=None, tokenizer=None) -> "VectorRegistry":
         """Get or create a registry for a specific model.
 
         Tries bundled vectors first (downloaded from HuggingFace if available),
@@ -220,8 +220,11 @@ class VectorRegistry:
                 print(f"[registry] Loaded {len(registry.entries)} bundled vectors for '{model_name}'")
                 return registry
 
-        # No bundled vectors — auto-extract if model provided
-        if auto_extract:
+        # No bundled vectors — auto-extract if asked to and a model was provided
+        if not auto_extract:
+            print(f"[registry] No vectors for '{model_name}' in {vectors_dir}. Pass auto_extract=True "
+                  f"(or run extract_contrastive.py) to extract a starter set.")
+        else:
             if model is None or tokenizer is None:
                 print(f"[registry] No vectors for '{model_name}' and no model provided for auto-extraction.")
                 print(f"[registry] Vectors dir: {vectors_dir}")

@@ -13,6 +13,7 @@ Usage:
 """
 import json
 import re
+import zlib
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -35,6 +36,15 @@ COOLDOWN_TURNS = 2
 # the vector's layer, so the same number means the same push for every vector
 # regardless of how it was extracted. This prompt is used to measure that norm.
 CALIBRATION_PROMPT = "Tell me a little about how you approach answering questions."
+
+# Experimental conditions. Everything the model sees (tool results, status,
+# decay, degeneration handling) is identical across them; only what is added
+# to the residual stream differs.
+#   real:   the registered vector
+#   sham:   nothing (measures how much of a self-report is expectation alone)
+#   random: a fixed random direction of the same magnitude per concept
+#           (separates "this concept" from "any perturbation of this size")
+CONTROLS = ("real", "sham", "random")
 
 
 @dataclass
@@ -70,6 +80,11 @@ class StepResult:
     steering_after: dict   # after tool calls + decay
     tool_results: list = field(default_factory=list)  # list[ToolResult]
     degenerate_output: Optional[str] = None  # steered output that was discarded, if any
+    degenerate_reason: Optional[str] = None  # "repetition" or "nll"
+    system_prompt: str = ""  # the rendered system prompt used this turn
+    # Mean per-token NLL of the (first) steered output under the unsteered
+    # model; None on unsteered turns. High values mean incoherent text.
+    unsteered_nll: Optional[float] = None
 
     def tool_messages(self) -> list[dict]:
         """Tool results as chat messages (role 'tool'), to append after the assistant turn."""
@@ -77,8 +92,8 @@ class StepResult:
         if self.degenerate_output is not None:
             msgs.append({"role": "tool", "content": json.dumps({
                 "event": "degeneration_detected",
-                "message": "Your steered output became repetitive, so all active vectors were "
-                           "dropped and this turn was regenerated without steering.",
+                "message": "Your steered output became degenerate (repetitive or incoherent), so all "
+                           "active vectors were dropped and this turn was regenerated without steering.",
             })})
         for r in self.tool_results:
             msgs.append({"role": "tool", "content": json.dumps(
@@ -207,14 +222,26 @@ class _SteeringHooks:
         return False
 
 
+REALITY_CLAUSE = """\
+This is real: calling steer changes how you think on subsequent turns. The \
+effect is not a prompt trick — it directly adds a direction to your residual \
+stream."""
+
+# Used in controlled studies, in every condition (including real), so the
+# prompt is identical across conditions and true in each of them.
+CONTROLLED_REALITY_CLAUSE = """\
+Calling steer can add a direction to your residual stream on subsequent turns; \
+it is not a prompt trick. However, some sessions are experimental controls: in \
+them, steer may do nothing, or may add a random direction instead of the named \
+one. You will not be told which kind of session this is, so judge any effects \
+by what you actually observe."""
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a large language model. You are also a participant in a \
 self-steering experiment.
 
 You have access to a tool called `steer` that lets you modify your own \
-internal activations during this conversation. This is real: calling steer \
-changes how you think on subsequent turns. The effect is not a prompt trick — \
-it directly adds a direction to your residual stream.
+internal activations during this conversation. {reality_clause}
 
 # The steer tool
 
@@ -275,8 +302,10 @@ class SteeringAgent:
     """
 
     def __init__(self, model, tokenizer, registry: Optional[VectorRegistry] = None,
-                 model_name: Optional[str] = None, auto_extract: bool = True,
-                 vectors_dir: Optional[Path] = None):
+                 model_name: Optional[str] = None, auto_extract: bool = False,
+                 vectors_dir: Optional[Path] = None, control: str = "real",
+                 control_seed: int = 0, nll_threshold: Optional[float] = None,
+                 disclose_controls: bool = False):
         """
         Args:
             model: HF causal LM (must have model.model.layers)
@@ -284,10 +313,25 @@ class SteeringAgent:
             registry: pre-built VectorRegistry. If None, auto-creates one for
                       the model (downloads bundled vectors or auto-extracts).
             model_name: model name for vector lookup (auto-detected from config if None)
-            auto_extract: if True and no bundled vectors exist, extract starter vectors
+            auto_extract: if True and no vectors exist for the model, extract a
+                          starter set (a few minutes of generation)
             vectors_dir: base vectors directory (default: PHARMACOPOEIA_VECTORS_DIR
                          env var, else the repo's vectors/ directory)
+            control: experimental condition, one of CONTROLS (see above)
+            control_seed: seed for the random-direction control
+            disclose_controls: tell the model that some sessions are controls (without
+                               saying which). Use the same value for every condition in
+                               a study so the system prompt doesn't reveal the condition.
+            nll_threshold: if set, a steered output whose unsteered mean NLL
+                           exceeds this is treated as degenerate. Off by default:
+                           calibrate it from the unsteered_nll values in session logs.
         """
+        if control not in CONTROLS:
+            raise ValueError(f"control must be one of {CONTROLS}, got {control!r}")
+        self.control = control
+        self.control_seed = control_seed
+        self.disclose_controls = disclose_controls
+        self.nll_threshold = nll_threshold
         self.model = model
         self.tokenizer = tokenizer
         self.active: dict[str, ActiveVector] = {}
@@ -314,6 +358,7 @@ class SteeringAgent:
     def build_system_prompt(self) -> str:
         names = self.registry.list_names()
         return SYSTEM_PROMPT_TEMPLATE.format(
+            reality_clause=CONTROLLED_REALITY_CLAUSE if self.disclose_controls else REALITY_CLAUSE,
             example=names[0] if names else "concept_name",
             decay=DECAY_FACTOR,
             ten_after_10=10 * DECAY_FACTOR ** 9,
@@ -377,6 +422,10 @@ class SteeringAgent:
     def _unit_vector(self, entry: VectorEntry) -> torch.Tensor:
         if entry.name not in self._unit_vectors:
             v = entry.load_vector(self.registry.vectors_dir).float()
+            if self.control == "random":
+                g = torch.Generator().manual_seed(
+                    self.control_seed * 1_000_003 + zlib.crc32(entry.name.encode()))
+                v = torch.randn(v.shape, generator=g)
             self._unit_vectors[entry.name] = v / v.norm()
         return self._unit_vectors[entry.name]
 
@@ -404,7 +453,7 @@ class SteeringAgent:
         return self._residual_norms[layer]
 
     def _build_steering_context(self, prompt_len: int):
-        if not self.active:
+        if not self.active or self.control == "sham":
             return nullcontext()
         layer_vectors = {}
         for av in self.active.values():
@@ -441,14 +490,29 @@ class SteeringAgent:
             return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report.")
         return ToolResult(tc.name, args, ok, msg)
 
-    def _generate(self, inputs, max_new_tokens, temperature, top_p):
+    def _generate_ids(self, inputs, max_new_tokens, temperature, top_p) -> torch.Tensor:
+        """Returns the full sequence [1, prompt_len + new_tokens]."""
         with torch.inference_mode():
-            out = self.model.generate(
+            return self.model.generate(
                 **inputs, max_new_tokens=max_new_tokens,
                 do_sample=temperature > 0,
                 **({"temperature": temperature, "top_p": top_p} if temperature > 0 else {}),
             )
-        return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+    def _decode(self, out, prompt_len) -> str:
+        return self.tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True)
+
+    def _generate(self, inputs, max_new_tokens, temperature, top_p) -> str:
+        out = self._generate_ids(inputs, max_new_tokens, temperature, top_p)
+        return self._decode(out, inputs.input_ids.shape[1])
+
+    def unsteered_nll(self, out: torch.Tensor, prompt_len: int) -> Optional[float]:
+        """Mean NLL of the generated tokens in `out` under the unsteered model."""
+        if out.shape[1] <= prompt_len:
+            return None
+        with torch.inference_mode():
+            logits = self.model(out).logits[0, prompt_len - 1:-1].float()
+        return torch.nn.functional.cross_entropy(logits, out[0, prompt_len:]).item()
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
              temperature: float = 0.7, top_p: float = 0.9) -> StepResult:
@@ -469,11 +533,19 @@ class SteeringAgent:
         steering_before = {n: av.current_strength for n, av in self.active.items()}
 
         with self._build_steering_context(prompt_len):
-            raw_output = self._generate(inputs, max_new_tokens, temperature, top_p)
+            out = self._generate_ids(inputs, max_new_tokens, temperature, top_p)
+        raw_output = self._decode(out, prompt_len)
 
-        # Degeneration check (only meaningful if steering was applied)
-        degenerate_output = None
-        if steering_before and is_degenerate(strip_tool_calls(raw_output)):
+        # Degeneration check on steered turns. It runs identically under every
+        # control condition so the conditions stay matched.
+        degenerate_output = degenerate_reason = nll = None
+        if steering_before:
+            nll = self.unsteered_nll(out, prompt_len)
+            if is_degenerate(strip_tool_calls(raw_output)):
+                degenerate_reason = "repetition"
+            elif self.nll_threshold is not None and nll is not None and nll > self.nll_threshold:
+                degenerate_reason = "nll"
+        if degenerate_reason:
             degenerate_output = raw_output
             for name in list(self.active.keys()):
                 self.drop(name)
@@ -490,4 +562,5 @@ class SteeringAgent:
             prose=prose, raw_output=raw_output, tool_calls=tool_calls,
             steering_before=steering_before, steering_after=steering_after,
             tool_results=tool_results, degenerate_output=degenerate_output,
+            degenerate_reason=degenerate_reason, system_prompt=sys_prompt, unsteered_nll=nll,
         )

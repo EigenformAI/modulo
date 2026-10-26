@@ -157,3 +157,88 @@ def test_tool_messages_include_failures_and_degeneration():
     assert [m["role"] for m in msgs] == ["tool", "tool"]
     assert "degeneration_detected" in msgs[0]["content"]
     assert '"ok": false' in msgs[1]["content"] and "on cooldown" in msgs[1]["content"]
+
+
+# --- experimental controls ---
+
+@pytest.fixture
+def real_vector_registry(tmp_path):
+    import numpy as np
+    np.savez(tmp_path / "a.npz", vector=np.arange(1, 9, dtype=np.float32))
+    reg = StubRegistry(names=())
+    reg.vectors_dir = tmp_path
+    reg.entries = {"a": VectorEntry(name="a", file="a.npz", layer=0)}
+    return reg
+
+
+def test_unknown_control_rejected():
+    with pytest.raises(ValueError):
+        SteeringAgent(model=None, tokenizer=None, registry=StubRegistry(), control="placebo")
+
+
+def test_sham_applies_nothing_but_reports_success():
+    from contextlib import nullcontext
+    a = SteeringAgent(model=None, tokenizer=None, registry=StubRegistry(), control="sham")
+    r = a._execute(ToolCall("steer", {"concept": "a", "strength": 5.0}, ""))
+    assert r.ok and "a" in a.active and "a" in a.status()
+    # no hooks: returns before needing the model or residual norms
+    assert isinstance(a._build_steering_context(prompt_len=10), nullcontext)
+
+
+def test_random_control_direction_is_unit_deterministic_and_unrelated(real_vector_registry):
+    import torch
+    real = SteeringAgent(None, None, registry=real_vector_registry)._unit_vector(real_vector_registry.get("a"))
+    rand = lambda seed: SteeringAgent(None, None, registry=real_vector_registry, control="random",
+                                      control_seed=seed)._unit_vector(real_vector_registry.get("a"))
+    r1, r1_again, r2 = rand(1), rand(1), rand(2)
+    assert r1.shape == real.shape
+    assert torch.allclose(r1.norm(), torch.tensor(1.0))
+    assert torch.equal(r1, r1_again)
+    assert not torch.equal(r1, r2)
+    assert not torch.allclose(r1, real)
+
+
+def test_system_prompt_identical_across_controls_when_disclosed():
+    prompts = {c: SteeringAgent(None, None, registry=StubRegistry(), control=c,
+                                disclose_controls=True).build_system_prompt() for c in A.CONTROLS}
+    assert len(set(prompts.values())) == 1
+    assert "experimental controls" in prompts["real"]
+    plain = SteeringAgent(None, None, registry=StubRegistry()).build_system_prompt()
+    assert "experimental controls" not in plain and "This is real" in plain
+
+
+# --- registry / replay ---
+
+def test_for_model_does_not_auto_extract_by_default(tmp_path, capsys):
+    reg = VectorRegistry.for_model("some-org/unknown-model", base_dir=tmp_path,
+                                   model=object(), tokenizer=object())
+    assert reg.entries == {}
+    assert "auto_extract=True" in capsys.readouterr().out
+
+
+def test_replay_shows_session_header_and_hides_control_when_blind(tmp_path, capsys):
+    import json
+    import replay
+    log = tmp_path / "s.jsonl"
+    events = [
+        {"type": "session", "control": "sham", "model": "m", "git_commit": "abc123", "rng_seed": 7,
+         "generation": {}, "vectors": {"a": {"layer": 14, "sha256": "f" * 64}}},
+        {"type": "turn", "turn": 1, "role": "assistant", "content": "hi", "unsteered_nll": 2.5},
+        {"type": "steer", "turn": 1, "concept": "a", "strength": 5, "success": True, "message": "ok"},
+        {"type": "steer", "turn": 2, "concept": "a", "strength": 5, "success": True},  # pre-fix log line
+    ]
+    log.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    replay.replay(str(log), blind=True)
+    out = capsys.readouterr().out
+    assert "control=(hidden)" in out and "sham" not in out
+    assert "NLL" not in out, "NLL differs by condition, so it must be hidden when blind"
+    assert "-> ?" in out
+    replay.replay(str(log))
+    out = capsys.readouterr().out
+    assert "control=sham" in out and "unsteered NLL: 2.50" in out
+
+
+def test_extract_vector_rejects_unknown_read_mode():
+    from pharmacopoeia.extraction import extract_vector
+    with pytest.raises(ValueError):
+        extract_vector(None, None, "a", "b", 0, questions=[], read="median")
