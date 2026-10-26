@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Session logs (generated at runtime)
+logs/
+
+# HF cache (if downloaded locally)
+hf_cache/
+
+# Large model artifacts — downloaded by setup.sh, not committed
+*.bin
+*.safetensors
+# Keep the assistant_axis.pt vector (it's only ~200KB and needed)
+!vectors/assistant_axis.pt
+
+# Extracted activation dumps
+vectors/*_activations/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

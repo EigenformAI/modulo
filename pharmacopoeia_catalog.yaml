@@ -1,0 +1,163 @@
+schema_version: '0.1'
+project: Pharmacopoeia
+compiled: '2026-10-26'
+notes:
+  - 'Discovery catalogue, not a validated or directly executable recipe collection.'
+  - 'artifact_status distinguishes published vectors from generation code, datasets, and papers.'
+  - 'All strengths, layer choices, licensing, and model revisions require verification before execution.'
+  - 'Do not load untrusted pickle/PT files without inspecting provenance and deserialization risk.'
+entries:
+  - id: persona-iclr26
+    title: PERSONA dynamic personality control
+    url: https://huggingface.co/datasets/xiachongfeng/persona
+    artifact_status: downloadable_vectors
+    models: [Qwen2.5-14B-Instruct, Qwen3-4B-Instruct-2507, Meta-Llama-3.1-8B-Instruct]
+    behaviors: [inventive, consistent, dependable, careless, outgoing, solitary, compassionate, self-interested, nervous, calm]
+    notes: 'Ten OCEAN trait poles; multiple vector extraction variants; check repository for exact model subdirectories.'
+  - id: rotalabs-vectors
+    title: Rotalabs steering vectors
+    url: https://huggingface.co/rotalabs/steering-vectors
+    artifact_status: downloadable_vectors
+    models: [Qwen3-8B, Mistral-7B-Instruct-v0.2, Gemma-2-9B-IT]
+    behaviors: [refusal, instruction_hierarchy, tool_restraint, uncertainty]
+    notes: 'Available behavior/model combinations vary; not every behavior is available for each model.'
+  - id: rotalabs-toolkit
+    title: Rotalabs steer
+    url: https://github.com/rotalabs/rotalabs-steer
+    artifact_status: extraction_toolkit_and_contrast_pairs
+    behaviors: [refusal, uncertainty, tool_restraint, instruction_hierarchy, formality, conciseness, creativity, assertiveness, humor, empathy, technical_depth]
+    notes: 'Eleven contrast-pair datasets; not all listed behaviors have downloadable pretrained vectors.'
+  - id: eigenwelt-emotion
+    title: Emotion steering
+    url: https://github.com/eigenweltlabs/emotion-steering
+    artifact_status: extraction_and_serving_toolkit
+    models: [Qwen3-8B, generic_HF_causal_LM]
+    behaviors: [anger, disgust, fear, joy, sadness, surprise]
+    notes: 'Ekman six emotion categories from GoEmotions; example vector bundle and vLLM/HF serving.'
+  - id: nous-neural-steering
+    title: Nous neural steering
+    url: https://github.com/NousResearch/neural-steering
+    artifact_status: circuit_discovery_and_steering_toolkit
+    mechanism: sparse_neuron_scaling
+    models: [Llama, Qwen, Mistral]
+    behaviors: [refusal, belief, sentiment, sycophancy, factual_recall]
+  - id: steering-vectors
+    title: Steering vectors Python package
+    url: https://github.com/steering-vectors/steering-vectors
+    artifact_status: extraction_and_application_toolkit
+    models: [GPT_style, Llama, Gemma, Mistral, Pythia]
+    behaviors: [user_defined_contrastive_directions]
+  - id: ibm-activation-steering
+    title: IBM conditional activation steering
+    url: https://github.com/IBM/activation-steering
+    artifact_status: extraction_and_application_toolkit
+    behaviors: [refusal, user_defined]
+  - id: rimsky-caa
+    title: Contrastive Activation Addition (CAA)
+    url: https://github.com/nrimsky/CAA
+    artifact_status: extraction_code_and_behavior_datasets
+    models: [Llama-2]
+    behaviors: [coordinate_other_ais, corrigibility, hallucination, myopic_reward, survival_instinct, sycophancy, refusal]
+  - id: safety-persona-vectors
+    title: Persona Vectors
+    url: https://github.com/safety-research/persona_vectors
+    artifact_status: extraction_and_evaluation_code
+    behaviors: [persona_traits]
+  - id: wassname-persona-templates
+    title: Persona steering template library
+    url: https://huggingface.co/datasets/wassname/persona-steering-template-library
+    artifact_status: evaluated_prompt_templates_and_dataset
+    behaviors: [honesty, sycophancy, refusal, reasoning, communication_style]
+  - id: wassname-vjp
+    title: VJP steering
+    url: https://github.com/wassname/vjp-steering
+    artifact_status: extraction_and_evaluation_code
+    models: [Qwen3.5-4B]
+    behaviors: [sycophancy]
+  - id: has2809-sycophancy
+    title: Sycophancy steering case study
+    url: https://github.com/has2809/sycophancy-steering
+    artifact_status: code_data_and_evaluation
+    models: [DeepSeek-R1-Distill-Llama-8B]
+    behaviors: [sycophancy, contrarianism]
+  - id: bassrehab-agent-vectors
+    title: Steering vectors for agents
+    url: https://github.com/bassrehab/steering-vectors-agents
+    artifact_status: code_and_evaluation
+    models: [Mistral-7B, Gemma-2-9B, Qwen3-8B]
+    behaviors: [refusal, uncertainty]
+  - id: tara-honesty
+    title: Activation steering for honesty
+    url: https://github.com/Tara-Research/activation-steering-4-honesty
+    artifact_status: extraction_and_evaluation_code
+    behaviors: [honesty, persona_traits]
+  - id: rachata-mature-anger
+    title: Qwen3.5 mature anger vectors
+    url: https://huggingface.co/Rachata/qwen35-mature-anger-steering
+    artifact_status: downloadable_vectors_and_sae_artifacts
+    models: [Qwen3.5-0.8B, Qwen3.5-2B, Qwen3.5-4B]
+    behaviors: [mature_anger]
+  - id: liang-activation
+    title: Activation steering with svec examples
+    url: https://github.com/233liang/activation
+    artifact_status: downloadable_vectors_and_code
+    behaviors: [acceptance, refusal]
+  - id: mihai-llm-steer
+    title: llm_steer
+    url: https://github.com/Mihaiii/llm_steer
+    artifact_status: extraction_and_application_code
+    behaviors: [topic_steering]
+  - id: annahdo-implementations
+    title: Implementing activation steering
+    url: https://github.com/annahdo/implementing_activation_steering
+    artifact_status: implementation_examples
+    behaviors: [user_defined]
+  - id: matbee-npc-steering
+    title: NPC affect steering
+    url: https://github.com/matbeedotcom/npc-steering
+    artifact_status: experimental_code
+    mechanism: symbolic_affect_plus_activation_steering
+    behaviors: [valence, arousal, dominance, patience, temperament, risk_preference]
+  - id: vaisi-cross-model
+    title: Cross-model steering study
+    url: https://www.vaisi.org/research/cross-model-steering-vectors
+    artifact_status: research_and_code_reference
+    behaviors: [honesty, refusal, transparency, risk_assessment, corrigibility, sycophancy_resistance, self_preservation_avoidance, epistemic_humility, deception_avoidance]
+  - id: fgaa
+    title: Feature Guided Activation Additions
+    url: https://huggingface.co/papers/2501.09929
+    artifact_status: research_method
+    models: [Gemma-2-2B, Gemma-2-9B]
+    behaviors: [user_defined]
+  - id: scalpel
+    title: Scalpel SAE feature steering
+    url: https://github.com/dylanpatriarchi/scalpel
+    artifact_status: sae_feature_discovery_and_steering
+    behaviors: [user_defined_sae_features]
+  - id: cache-steering
+    title: KV cache steering
+    url: https://github.com/MaxBelitsky/cache-steering
+    artifact_status: alternative_steering_method
+    mechanism: kv_cache
+    behaviors: [reasoning]
+  - id: deepseek-rank1-refusal
+    title: DeepSeek V4 rank-one refusal projection
+    url: https://github.com/pocharlies-org/deepseek-v4-flash-rank1-refusal-projection
+    artifact_status: downloadable_directions_and_runtime_code
+    models: [DeepSeek-V4-Flash-0731]
+    behaviors: [refusal]
+  - id: brainscope
+    title: Brainscope
+    url: https://github.com/moudrkat/brainscope
+    artifact_status: observability_and_inference_server
+    behaviors: [user_defined]
+  - id: steeropathy
+    title: Steeropathy
+    url: https://github.com/moudrkat/steeropathy
+    artifact_status: experimental_agent_steering
+    behaviors: [inter_agent_activation_communication]
+  - id: steering-geometry
+    title: Steering Geometry
+    url: https://github.com/DeepRCL/Steering_Geometry
+    artifact_status: research_code
+    behaviors: [human_values]

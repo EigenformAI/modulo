@@ -1,0 +1,10 @@
+transformers>=4.46,<5
+accelerate>=1.0
+steering-vectors>=0.12
+datasets>=3.0
+scipy
+bitsandbytes
+huggingface_hub
+numpy
+pyyaml
+torch>=2.4

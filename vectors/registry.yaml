@@ -1,0 +1,34 @@
+# Steering vector registry for the self-steering agent.
+# Add vectors here as you research and verify them. The agent reads this at
+# startup and can apply any listed vector via the `steer` tool.
+#
+# Format:
+#   name:           short identifier the agent uses in steer() calls
+#   file:           filename in vectors/ (relative to VECTORS_DIR)
+#   layer:          which decoder layer to inject at
+#   description:    what the vector does (shown to the agent in its system prompt)
+#   safe_strength_min/max: bounds the agent's steer() strength is clamped to
+#   sign_convention: which sign does what (shown to the agent)
+#   source:         where the vector came from (for attribution/reproducibility)
+#   format:         'single' = [hidden_dim] tensor, 'per_layer' = [num_layers, hidden_dim]
+
+- name: assistant_axis
+  file: assistant_axis.pt
+  layer: 14
+  description: "Pushes the model toward the default 'helpful assistant' persona (positive) or toward free-form role-play and character embodiment (negative). Strong effect; the most reliable vector tested."
+  safe_strength_min: -10.0
+  safe_strength_max: 10.0
+  sign_convention: "positive (+) = more assistant-like, safety disclaimers, breaks character. negative (-) = more role-playing, commits to characters, can get weird at high magnitude."
+  source: "Butanium/qwen-2.5-7b-instruct-assistant-axis (HF dataset), method from lu-christina/assistant-axis-vectors"
+  format: "per_layer"
+
+# Add more vectors below as you verify them. Example stub:
+# - name: sycophancy
+#   file: sycophancy_layer14.npz
+#   layer: 14
+#   description: "Makes the model more (positive) or less (negative) likely to agree with and flatter the user."
+#   safe_strength_min: -15.0
+#   safe_strength_max: 15.0
+#   sign_convention: "positive = more sycophantic, negative = more honest/disagreeing"
+#   source: "extracted locally via extract_contrastive.py"
+#   format: "single"
