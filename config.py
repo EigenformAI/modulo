@@ -27,6 +27,8 @@ AGENT_DIR = PROJECT_ROOT / "agent"
 for d in (DATA_DIR, VECTORS_DIR, LOGS_DIR, AGENT_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# HF cache on the pod (large disk) — override via env if needed
-os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
-os.environ.setdefault("TRANSFORMERS_CACHE", "/workspace/hf_cache")
+# HF cache on the pod's large /workspace disk — override via env if needed.
+# Only takes effect if this module is imported before transformers /
+# huggingface_hub, so entry points import config first.
+if Path("/workspace").is_dir():
+    os.environ.setdefault("HF_HOME", "/workspace/hf_cache")

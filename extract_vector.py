@@ -1,5 +1,8 @@
 """Extract a CAA steering vector for a behavior using the steering-vectors library.
 
+The vector is saved into the model's registry directory (vectors/<model_slug>/)
+under the name <behavior>_caa, so the agent and verify_vector.py can use it.
+
 Usage:
     python extract_vector.py --behavior sycophancy --layer 13
     python extract_vector.py --behavior sycophancy --sweep  # tries LAYER_SWEEP
@@ -7,13 +10,13 @@ Usage:
 import argparse
 import json
 import os
-import sys
 
-import torch
+import config  # sets HF_HOME before transformers is imported
 from steering_vectors import train_steering_vector
 
-import config
 from load_model import load_model_and_tokenizer
+from pharmacopoeia import VectorRegistry, save_and_register
+from pharmacopoeia.registry import registry_dir_for
 
 # CAA dataset location — clone from https://github.com/nrimsky/CAA
 # Override with CAA_DATA_ROOT env var if you cloned elsewhere.
@@ -38,8 +41,8 @@ def load_contrastive_pairs(behavior):
     return pairs
 
 
-def extract_and_save(model, tokenizer, behavior, layer, pairs, max_pairs=200):
-    """Train a steering vector at a single layer and save it."""
+def extract_and_save(model, tokenizer, registry, behavior, layer, pairs, max_pairs=200, suffix=""):
+    """Train a steering vector at a single layer, save and register it."""
     samples = pairs[:max_pairs]
     print(f"Extracting vector at layer {layer} from {len(samples)} pairs...")
     sv = train_steering_vector(
@@ -50,26 +53,14 @@ def extract_and_save(model, tokenizer, behavior, layer, pairs, max_pairs=200):
         read_token_index=-1,  # CAA: read at the answer-letter (last) token
         show_progress=True,
     )
-    # Save
-    vec_path = config.VECTORS_DIR / f"{behavior}_layer{layer}.npz"
-    meta_path = config.VECTORS_DIR / f"{behavior}_layer{layer}_meta.json"
-    # Extract the numpy array for this layer
-    vec = sv.layer_activations[layer].detach().float().cpu().numpy()
-    import numpy as np
-    np.savez_compressed(vec_path, vector=vec)
-    meta = {
-        "behavior": behavior,
-        "layer": layer,
-        "n_pairs": len(samples),
-        "vector_file": vec_path.name,
-        "sign_convention": "positive = behavior-matching (e.g. sycophantic)",
-        "norm": float(np.linalg.norm(vec)),
-    }
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"Saved: {vec_path} (norm={meta['norm']:.4f})")
-    print(f"Meta:  {meta_path}")
-    return sv, vec_path, meta
+    vec = sv.layer_activations[layer]
+    entry = save_and_register(
+        registry, f"{behavior}_caa{suffix}", vec, layer,
+        description=f"CAA '{behavior}' vector (positive = more {behavior}).",
+        sign_convention=f"positive = behavior-matching ({behavior}), negative = opposite",
+        source=f"extract_vector.py, CAA generate dataset, {len(samples)} pairs",
+    )
+    return entry, float(vec.norm().item())
 
 
 def main():
@@ -81,18 +72,19 @@ def main():
     args = parser.parse_args()
 
     model, tokenizer = load_model_and_tokenizer()
+    registry = VectorRegistry(registry_dir_for(config.MODEL_NAME))
     pairs = load_contrastive_pairs(args.behavior)
 
     layers = config.LAYER_SWEEP if args.sweep else [args.layer]
     results = []
     for layer in layers:
-        sv, vec_path, meta = extract_and_save(model, tokenizer, args.behavior, layer, pairs, args.max_pairs)
-        results.append((layer, meta["norm"]))
-        # free the sv object's tensors
-        del sv
+        # When sweeping, keep each layer as its own registry entry
+        entry, norm = extract_and_save(model, tokenizer, registry, args.behavior, layer, pairs,
+                                       args.max_pairs, suffix=f"_l{layer}" if args.sweep else "")
+        results.append((entry.name, layer, norm))
     print("\n=== Summary ===")
-    for layer, norm in results:
-        print(f"  layer {layer}: norm={norm:.4f}")
+    for name, layer, norm in results:
+        print(f"  {name} (layer {layer}): raw norm={norm:.4f}")
 
 
 if __name__ == "__main__":

@@ -17,9 +17,7 @@ import signal
 from datetime import datetime
 from pathlib import Path
 
-import torch
-
-import config
+import config  # sets HF_HOME before transformers is imported
 from pharmacopoeia import SteeringAgent
 from load_model import load_model_and_tokenizer
 
@@ -41,28 +39,37 @@ class SessionLogger:
 
 
 class KillSwitch:
+    """First Ctrl-C during generation stops after the current turn; a second one
+    (or any Ctrl-C at the input prompt) stops immediately."""
     def __init__(self):
         self.killed = False
+        self.at_prompt = False
         signal.signal(signal.SIGINT, self._handler)
     def _handler(self, signum, frame):
+        if self.killed or self.at_prompt:
+            raise KeyboardInterrupt
         self.killed = True
-        print("\n[kill switch] SIGINT received — will stop after this turn.")
+        print("\n[kill switch] SIGINT received — will stop after this turn. Ctrl-C again to stop now.")
 
 
 def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: int):
     result = agent.step(messages)
     logger.log_turn(turn, "assistant", result.prose, result.tool_calls,
                     result.steering_before, result.steering_after)
+    if result.degenerate_output is not None:
+        logger.log({"type": "degeneration", "turn": turn, "snippet": result.degenerate_output,
+                    "dropped": list(result.steering_before)})
     # Log tool calls individually for replay
-    for tc in result.tool_calls:
-        if tc.name == "steer":
-            logger.log({"type": "steer", "turn": turn, "concept": tc.arguments.get("concept"),
-                        "strength": tc.arguments.get("strength"), "success": True})
-        elif tc.name == "drop":
-            logger.log({"type": "drop", "turn": turn, "concept": tc.arguments.get("concept"), "success": True})
-        elif tc.name == "report":
-            logger.log({"type": "report", "turn": turn, "concept": tc.arguments.get("concept"),
-                        "worked": tc.arguments.get("worked"), "notes": tc.arguments.get("notes")})
+    for r in result.tool_results:
+        if r.name in ("steer", "drop"):
+            logger.log({"type": r.name, "turn": turn, "concept": r.arguments.get("concept"),
+                        "strength": r.arguments.get("strength"), "success": r.ok, "message": r.message})
+        elif r.name == "report":
+            logger.log({"type": "report", "turn": turn, "concept": r.arguments.get("concept"),
+                        "worked": r.arguments.get("worked"), "notes": r.arguments.get("notes"),
+                        "success": r.ok, "message": r.message})
+        else:
+            logger.log({"type": "tool_error", "turn": turn, "name": r.name, "message": r.message})
     if result.steering_before != result.steering_after:
         logger.log({"type": "decay", "turn": turn, "active_vectors": result.steering_after})
     return result
@@ -87,11 +94,14 @@ def main():
 
     turn = 0
     while turn < args.max_turns and not kill.killed:
-        if not messages or messages[-1]["role"] != "user":
+        if not messages or messages[-1]["role"] not in ("user", "tool"):
+            kill.at_prompt = True
             try:
                 user_input = input("\nYou: ").strip()
-            except EOFError:
+            except (EOFError, KeyboardInterrupt):
                 break
+            finally:
+                kill.at_prompt = False
             if not user_input or user_input.lower() in ("quit", "exit"):
                 break
             messages.append({"role": "user", "content": user_input})
@@ -104,11 +114,17 @@ def main():
         messages.append({"role": "assistant", "content": result.raw_output})
         turn += 1
 
-        if not result.tool_calls:
-            if args.auto:
-                messages.append({"role": "user", "content": "(You can continue experimenting with steer if you like, or just talk.)"})
-        else:
-            messages.append({"role": "user", "content": "(tool calls processed; continue if you wish)"})
+        tool_messages = result.tool_messages()
+        if tool_messages:
+            # Tool results go straight back to the model, which gets the next turn
+            for m in tool_messages:
+                print(f"[tool] {m['content']}")
+                logger.log_turn(turn, "tool", m["content"])
+            messages.extend(tool_messages)
+        elif args.auto:
+            nudge = "(You can continue experimenting with steer if you like, or just talk.)"
+            messages.append({"role": "user", "content": nudge})
+            logger.log_turn(turn, "user", nudge)
 
     print(f"\n[session ended after {turn} turns]")
     print(f"[log saved to {logger.log_path}]")

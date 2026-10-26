@@ -13,13 +13,13 @@ A self-steering agent library: gives any local HF model the ability to steer its
 ```python
 from pharmacopoeia import SteeringAgent
 
-agent = SteeringAgent(model, tokenizer)  # any HF causal LM
-# agent.step(messages) -> StepResult(prose, raw_output, tool_calls, ...)
-# agent.build_system_prompt() -> system prompt with steer tool
-# agent.status() -> active vector status
+agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers
+result = agent.step(messages)             # -> StepResult
+messages += [{"role": "assistant", "content": result.raw_output}]
+messages += result.tool_messages()        # tool results back to the model
 ```
 
-The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`. Steering is transparent — the harness doesn't need to know about hooks or vectors.
+The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`, then appends the assistant output and `result.tool_messages()` (role `tool`) so the model sees whether its calls worked. If there are tool messages, give the model the next turn. Steering is transparent — the harness doesn't need to know about hooks or vectors.
 
 ### 2. As a standalone demo
 
@@ -51,7 +51,22 @@ The library uses a **bundle + extract** strategy:
 1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
 2. **Auto-extract**: If no bundled vectors exist, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
 
-Vectors are stored per-model in `vectors/<model_slug>/`.
+Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `PHARMACOPOEIA_VECTORS_DIR`.
+
+To add your own vectors, extract and register them in one step, then check them:
+
+```bash
+python extract_contrastive.py --name sycophancy --prompt-a "..." --prompt-b "..." --layer 14 \
+    --description "..." --sign-convention "..."
+python extract_vector.py --behavior sycophancy --layer 13       # CAA A/B pairs (needs CAA repo)
+python verify_vector.py --vector sycophancy --strength 10       # baseline vs ±strength
+```
+
+Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while steering was silently a no-op during generation, so that needs re-testing.
+
+## Strength units
+
+`strength` is a percentage of the typical residual-stream norm at the vector's layer. Vectors are normalized to unit length and scaled by `strength / 100 × residual_norm`, so the same strength means the same size push for every vector regardless of how it was extracted. On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–15 and collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
 
 ## Library API
 
@@ -87,11 +102,14 @@ vec = extract_vector(model, tokenizer,
 - `prose` — model output with tool calls stripped
 - `raw_output` — full model output
 - `tool_calls` — list of `ToolCall(name, arguments, raw)`
+- `tool_results` — list of `ToolResult(name, arguments, ok, message)`
+- `degenerate_output` — the discarded steered output, if the degeneration detector fired
 - `steering_before` / `steering_after` — `{name: strength}` dicts
+- `tool_messages()` — tool results (and any degeneration notice) as `role: "tool"` messages
 
 ## The tools the model has
 
-The model emits these as JSON (Qwen2.5 chat template format):
+The model emits these as JSON objects anywhere in its output (bare or inside `<tool_call>` tags):
 
 - `{"name": "steer", "arguments": {"concept": "sycophancy", "strength": 5.0}}`
 - `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
@@ -111,19 +129,19 @@ The model emits these as JSON (Qwen2.5 chat template format):
     "layer": 16,
     "description": "...",
     "sign_convention": "...",
-    "safe_strength_min": -10.0,
-    "safe_strength_max": 10.0,
+    "safe_strength_min": -15.0,  # % of residual norm; also capped by MAX_STRENGTH
+    "safe_strength_max": 15.0,
     "format": "per_layer",
 },
 ```
 
 ## Safety rails (built in)
 
-- Vectors decay 0.85× per turn, drop below 0.1 strength
-- Max 4 active vectors, max strength 10.0
-- Cooldown: can't re-apply a dropped vector for 2 turns
-- Degeneration detector: auto-drops all vectors if output becomes repetitive
-- Hard kill switch: Ctrl-C stops after current turn
+- Vectors decay 0.85× per turn (after their first steered turn) and expire below 0.1 strength
+- Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `pharmacopoeia/agent.py`), plus per-vector ranges
+- Cooldown: after an explicit or automatic drop, a vector can't be re-applied for the next 2 turns (natural expiry has no cooldown)
+- Degeneration detector: if steered output is repetitive, all vectors are dropped, the turn is regenerated unsteered, and the model is told. It catches repetition loops, not non-repetitive word salad.
+- Kill switch: Ctrl-C stops after the current turn; a second Ctrl-C (or Ctrl-C at the input prompt) stops immediately
 
 ## Key files
 
@@ -138,7 +156,10 @@ The model emits these as JSON (Qwen2.5 chat template format):
 | `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |
-| `vectors/<model_slug>/` | Per-model vector storage |
+| `vectors/<model_slug>/` | Per-model vector storage + `registry.yaml` |
+| `extract_contrastive.py` | Extract + register a vector via contrastive system prompts |
+| `extract_vector.py` | Extract + register a CAA vector |
+| `verify_vector.py` | Compare baseline vs ±strength outputs for a registered vector |
 | `pharmacopoeia_catalog.yaml` | Discovery catalog of 26+ vector sources |
 | `replay.py` | Replay a session log as a timeline |
 
@@ -147,5 +168,7 @@ The model emits these as JSON (Qwen2.5 chat template format):
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
 - **First run is slow for new models**: Auto-extraction generates 3 vectors (~2 min). Subsequent runs load from disk.
 - **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
-- **Output degenerates**: Degeneration detector should auto-drop vectors. If not, tighten safe-strength range in registry.yaml.
+- **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range in its `registry.yaml` or lower `MAX_STRENGTH`.
+- **Steering seems to have no effect**: Run `python verify_vector.py --vector <name> --strength 12`. If the ± outputs match the baseline, the vector (not the steering) is the problem.
+- **Model downloaded twice**: `HF_HOME` is set to `/workspace/hf_cache` when `/workspace` exists, which only works if `config` is imported before `transformers` (the entry points do this). Older runs may have left a copy in `~/.cache/huggingface`.
 - **`model.model.layers` not found**: The library assumes standard HF architecture. Custom model classes may need adapter code.

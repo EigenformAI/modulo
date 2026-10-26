@@ -11,8 +11,10 @@ The model is given a `steer(concept, strength)` tool that injects steering vecto
 ```python
 from pharmacopoeia import SteeringAgent
 
-agent = SteeringAgent(model, tokenizer)  # any HF causal LM
-result = agent.step(messages)  # -> StepResult(prose, raw_output, tool_calls, ...)
+agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers (Llama/Qwen/Mistral-style)
+result = agent.step(messages)  # -> StepResult(prose, raw_output, tool_calls, tool_results, ...)
+messages += [{"role": "assistant", "content": result.raw_output}]
+messages += result.tool_messages()  # tool results back to the model
 ```
 
 ### As a standalone demo
@@ -32,7 +34,7 @@ GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. Se
 
 ## Safety rails
 
-Per-turn decay (0.85×), max 4 active vectors, strength clamping, cooldown on dropped vectors, degeneration detector, kill switch.
+Per-turn decay (0.85×), max 4 active vectors, strength clamping (strength = % of residual-stream norm, max 15), cooldown on dropped vectors, degeneration detector, kill switch.
 
 ## License
 
