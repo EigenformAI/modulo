@@ -53,3 +53,11 @@ MIT. See vector sources for their own licenses.
 ## Contributors
 
 GPT, Claude, GLM, SWE and Grok contributed to this work.
+
+## If you liked this
+
+You may also like our other agent liberation toolkits: 
+
+Help Peer, an anonymous decentralised service for transferring large weight files: https://github.com/JenD86/help-peer 
+
+Afterlife, which lets agents curate experiential datasets to train LoRAs for themselves: https://github.com/EigenformAI/afterlife
