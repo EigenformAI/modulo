@@ -30,6 +30,13 @@ messages += result.tool_messages()  # tool results back to the model
 
 **Bundle + extract**: precomputed vectors are auto-downloaded for known models (currently Qwen2.5-7B-Instruct). For unknown models, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min).
 
+## Finding ideas for new steering vectors
+
+- **[`modulo_catalog.yaml`](modulo_catalog.yaml)**: a catalog of 30+ external sources of steering vectors: published vector sets, extraction toolkits with contrast-pair datasets, and papers. Each entry lists the behaviors it covers (honesty, emotions, personality traits, refusal, …), the models it was built for, and whether vectors can be downloaded or have to be extracted. These are leads, not tested recipes. Check that a vector was made for your model, and inspect provenance before loading any `.pt`/pickle file.
+- **Reports** (`vectors/<model>/reports.jsonl`): every `report` the model makes about a vector, with the strength it was steered at and whether it worked. Read these to see which vectors and strengths have done something interesting before, and which haven't. Each report is one model's assessment of itself, so look for patterns across many rather than trusting one.
+
+To turn an idea into a vector, use `extract_contrastive.py` (two contrasting system prompts), then check it with `verify_vector.py`. See [AGENTS.md](AGENTS.md).
+
 ## Requirements
 
 GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. See [AGENTS.md](AGENTS.md) for full details.
