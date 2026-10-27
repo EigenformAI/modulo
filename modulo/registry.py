@@ -12,12 +12,14 @@ to generate a starter set.
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import torch
 import yaml
+
+from modulo.reports import append_report, file_sha256
 
 
 # Base directory for per-model vector dirs. Resolved from this file rather than
@@ -122,7 +124,6 @@ class VectorEntry:
     sign_convention: str = ""
     source: str = ""
     format: str = "single"  # 'single' or 'per_layer'
-    feedback: list = field(default_factory=list)
 
     def load_vector(self, vectors_dir: Path) -> torch.Tensor:
         """Load the actual vector tensor for this entry's layer."""
@@ -154,6 +155,7 @@ class VectorRegistry:
         with open(self.registry_path) as f:
             data = yaml.safe_load(f) or []
         for item in data:
+            item.pop("feedback", None)  # older registries kept reports here
             entry = VectorEntry(**item)
             self.entries[entry.name] = entry
 
@@ -163,9 +165,16 @@ class VectorRegistry:
     def list_names(self) -> list[str]:
         return list(self.entries.keys())
 
-    def add_feedback(self, name: str, worked: bool, notes: str):
-        if name in self.entries:
-            self.entries[name].feedback.append({"worked": worked, "notes": notes})
+    @property
+    def reports_path(self) -> Path:
+        return Path(self.vectors_dir) / "reports.jsonl"
+
+    def add_report(self, report: dict):
+        """Append a report (see modulo.reports.make_report) to reports.jsonl."""
+        append_report(self.reports_path, report)
+
+    def vector_sha256(self, entry: VectorEntry) -> Optional[str]:
+        return file_sha256(Path(self.vectors_dir) / entry.file)
 
     def describe_for_prompt(self, max_strength: float = float("inf")) -> str:
         if not self.entries:
@@ -185,8 +194,7 @@ class VectorRegistry:
         """Save the registry back to YAML."""
         data = []
         for entry in self.entries.values():
-            d = {k: v for k, v in entry.__dict__.items() if k != "feedback"}
-            data.append(d)
+            data.append(dict(entry.__dict__))
         self.vectors_dir.mkdir(parents=True, exist_ok=True)
         with open(self.registry_path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False)

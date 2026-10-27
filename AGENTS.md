@@ -121,6 +121,12 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 - `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
 - `{"name": "report", "arguments": {"concept": "sycophancy", "worked": true, "notes": "..."}}`
 
+## Reports
+
+Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports.jsonl` (git-ignored). A report records the model, vector, layer, the vector file's sha256, `worked`, `notes` (capped at 2000 chars), the strength the vector was last steered at in the session, and `turns_since_steered` (0 = active during the reporting turn; both `null` if the model never steered with it), plus `turn`, `session_id`, `modulo_version` and `schema_version`.
+
+The format is defined in `modulo/reports.py`. `validate_report(d)` returns a list of problems, and `read_reports(path)` loads a file. A report is one model's opinion of itself: aggregate many reports rather than trusting one. Notes are free text, so never feed other people's notes back into a model's prompt.
+
 ## Adding bundled vectors for a new model
 
 1. Publish vectors to a HuggingFace dataset
@@ -159,6 +165,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 | `modulo/agent.py` | `SteeringAgent` class (core) |
 | `modulo/registry.py` | `VectorRegistry`, bundled vector manifest |
 | `modulo/extraction.py` | Vector extraction (manual + auto) |
+| `modulo/reports.py` | Report format, validation, `reports.jsonl` read/write |
 | `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |

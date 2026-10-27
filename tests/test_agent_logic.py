@@ -11,17 +11,19 @@ import modulo.agent as A
 from modulo.agent import (COOLDOWN_TURNS, DECAY_FACTOR, SteeringAgent, ToolCall,
                                  is_degenerate, parse_tool_calls, strip_tool_calls)
 from modulo.registry import VectorEntry, VectorRegistry
+from modulo.reports import MAX_NOTES_CHARS, read_reports, validate_report
 
 
 class StubRegistry(VectorRegistry):
-    def __init__(self, names=("a", "b")):
-        self.entries = {n: VectorEntry(name=n, file="x", layer=0) for n in names}
-        self.vectors_dir = None
+    def __init__(self, names=("a", "b"), vectors_dir=None):
+        self.entries = {n: VectorEntry(name=n, file=f"{n}.pt", layer=0) for n in names}
+        self.vectors_dir = vectors_dir
 
 
 @pytest.fixture
-def agent():
-    return SteeringAgent(model=None, tokenizer=None, registry=StubRegistry())
+def agent(tmp_path):
+    return SteeringAgent(model=None, tokenizer=None, model_name="test/model",
+                         registry=StubRegistry(vectors_dir=tmp_path))
 
 
 # --- tool parsing ---
@@ -150,7 +152,8 @@ def test_natural_expiry_has_no_cooldown(agent):
 
 
 def test_max_active_vectors(agent):
-    agent.registry = StubRegistry(names=[f"v{i}" for i in range(A.MAX_ACTIVE_VECTORS + 1)])
+    agent.registry = StubRegistry(names=[f"v{i}" for i in range(A.MAX_ACTIVE_VECTORS + 1)],
+                                  vectors_dir=agent.registry.vectors_dir)
     for i in range(A.MAX_ACTIVE_VECTORS):
         assert agent.apply(f"v{i}", 1.0)[0]
     ok, msg = agent.apply(f"v{A.MAX_ACTIVE_VECTORS}", 1.0)
@@ -182,7 +185,7 @@ def test_unknown_tool_returns_error(agent):
 def test_report_parses_string_booleans(agent):
     agent._execute(ToolCall("report", {"concept": "b", "worked": "false"}, ""))
     agent._execute(ToolCall("report", {"concept": "b", "worked": "true"}, ""))
-    assert [f["worked"] for f in agent.registry.entries["b"].feedback] == [False, True]
+    assert [r["worked"] for r in read_reports(agent.registry.reports_path)] == [False, True]
 
 
 def test_tool_messages_include_failures_and_degeneration():
@@ -194,6 +197,72 @@ def test_tool_messages_include_failures_and_degeneration():
     assert [m["role"] for m in msgs] == ["tool", "tool"]
     assert "degeneration_detected" in msgs[0]["content"]
     assert '"ok": false' in msgs[1]["content"] and "on cooldown" in msgs[1]["content"]
+
+
+# --- reports ---
+
+def _steered_step(agent, monkeypatch, output):
+    """Run step() with generation stubbed out (no model needed)."""
+    class FakeInputs:
+        input_ids = torch.zeros(1, 1)
+
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    monkeypatch.setattr(agent, "_generate", lambda *args: output)
+    return agent.step([{"role": "user", "content": "hi"}])
+
+
+def test_report_is_saved_with_steering_context(agent, monkeypatch):
+    (agent.registry.vectors_dir / "a.pt").write_bytes(b"vector bytes")
+    agent.apply("a", 5.0)
+    _steered_step(agent, monkeypatch, "Feeling different.")
+    _steered_step(agent, monkeypatch,
+                  '{"name": "report", "arguments": {"concept": "a", "worked": true, "notes": "more playful"}}')
+    [r] = read_reports(agent.registry.reports_path)
+    assert validate_report(r) == []
+    assert r["model"] == "test/model" and r["vector"] == "a" and r["layer"] == 0
+    assert r["worked"] is True and r["notes"] == "more playful"
+    assert r["strength"] == pytest.approx(5.0 * DECAY_FACTOR)  # in effect during the reporting turn
+    assert r["turns_since_steered"] == 0 and r["turn"] == 2
+    assert r["session_id"] == agent.session_id
+    assert len(r["vector_sha256"]) == 64
+
+
+def test_report_on_unsteered_vector_has_no_strength(agent):
+    r = agent._execute(ToolCall("report", {"concept": "b", "notes": "x" * (MAX_NOTES_CHARS + 50)}, ""))
+    assert r.ok
+    [saved] = read_reports(agent.registry.reports_path)
+    assert saved["strength"] is None and saved["turns_since_steered"] is None
+    assert saved["vector_sha256"] is None  # no vector file on disk
+    assert len(saved["notes"]) == MAX_NOTES_CHARS and validate_report(saved) == []
+
+
+def test_report_write_failure_returns_error(agent, tmp_path):
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("")
+    agent.registry.vectors_dir = blocker
+    r = agent._execute(ToolCall("report", {"concept": "a"}, ""))
+    assert not r.ok and "could not be saved" in r.message
+
+
+def test_validate_report_rejects_bad_reports(agent):
+    agent._execute(ToolCall("report", {"concept": "a"}, ""))
+    [good] = read_reports(agent.registry.reports_path)
+    assert validate_report("nope") == ["report is not a JSON object"]
+    assert "missing field 'model'" in validate_report({k: v for k, v in good.items() if k != "model"})
+    assert "unknown field 'extra'" in validate_report({**good, "extra": 1})
+    assert "'layer' has type bool" in validate_report({**good, "layer": True})
+    assert "'worked' has type str" in validate_report({**good, "worked": "yes"})
+    assert any("schema_version" in e for e in validate_report({**good, "schema_version": 99}))
+
+
+def test_registry_ignores_legacy_feedback_key(tmp_path):
+    (tmp_path / "registry.yaml").write_text(
+        "- name: a\n  file: a.pt\n  layer: 3\n  feedback: [{worked: true, notes: old}]\n")
+    reg = VectorRegistry(tmp_path)
+    assert reg.get("a").layer == 3
+    reg.save()
+    assert "feedback" not in (tmp_path / "registry.yaml").read_text()
 
 
 # --- prompt building ---
