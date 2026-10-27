@@ -18,6 +18,9 @@ hf_cache/
 # Keep the assistant_axis.pt vector (it's only ~200KB and needed)
 !vectors/Qwen_Qwen2.5-7B-Instruct/assistant_axis.pt
 
+# Local report logs (shared deliberately, not committed by accident)
+vectors/*/reports.jsonl
+
 # Extracted activation dumps
 vectors/*_activations/
 

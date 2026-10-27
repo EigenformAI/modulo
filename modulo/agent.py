@@ -23,6 +23,7 @@ from typing import Optional
 import torch
 
 from modulo.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
+from modulo.reports import make_report, new_session_id
 
 
 # --- Safety rails (tunable) ---
@@ -299,12 +300,16 @@ class SteeringAgent:
         self._turn_generated = False
         self._unit_vectors: dict[str, torch.Tensor] = {}
         self._residual_norms: dict[int, float] = {}
+        # name -> (strength, turn) of the most recent generation each vector steered
+        self._last_steered: dict[str, tuple[float, int]] = {}
+        self.session_id = new_session_id()
+        if model_name is None:
+            model_name = getattr(getattr(model, "config", None), "_name_or_path", "unknown_model")
+        self.model_name = model_name
 
         if registry is not None:
             self.registry = registry
         else:
-            if model_name is None:
-                model_name = getattr(model.config, "_name_or_path", "unknown_model")
             self.registry = VectorRegistry.for_model(
                 model_name, base_dir=vectors_dir or DEFAULT_VECTORS_DIR,
                 auto_extract=auto_extract, model=model, tokenizer=tokenizer,
@@ -441,10 +446,22 @@ class SteeringAgent:
         elif tc.name == "drop":
             ok, msg = self.drop(concept)
         elif tc.name == "report":
-            if self.registry.get(concept) is None:
+            entry = self.registry.get(concept)
+            if entry is None:
                 return ToolResult(tc.name, args, False, f"Unknown vector '{concept}'.")
-            self.registry.add_feedback(concept, _parse_bool(args.get("worked", True)),
-                                       str(args.get("notes", "")))
+            last = self._last_steered.get(concept)
+            report = make_report(
+                session_id=self.session_id, model=self.model_name, vector=concept,
+                layer=entry.layer, vector_sha256=self.registry.vector_sha256(entry),
+                worked=_parse_bool(args.get("worked", True)), notes=str(args.get("notes", "")),
+                strength=last[0] if last else None,
+                turns_since_steered=self.turn - last[1] if last else None,
+                turn=self.turn + 1,
+            )
+            try:
+                self.registry.add_report(report)
+            except OSError as e:
+                return ToolResult(tc.name, args, False, f"Report could not be saved: {e}")
             ok, msg = True, "Report logged."
         else:
             return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report.")
@@ -487,6 +504,8 @@ class SteeringAgent:
         prompt_len = inputs.input_ids.shape[1]
 
         steering_before = {n: av.current_strength for n, av in self.active.items()}
+        for name, strength in steering_before.items():
+            self._last_steered[name] = (strength, self.turn)
 
         with self._build_steering_context(prompt_len):
             raw_output = self._generate(inputs, max_new_tokens, temperature, top_p)

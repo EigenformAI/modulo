@@ -17,6 +17,7 @@ Quick start:
 from modulo.agent import SteeringAgent
 from modulo.registry import VectorRegistry, VectorEntry
 from modulo.extraction import extract_vector, extract_auto, save_and_register
+from modulo.reports import read_reports, validate_report
 
 __version__ = "0.1.0"
 
@@ -27,4 +28,6 @@ __all__ = [
     "extract_vector",
     "extract_auto",
     "save_and_register",
+    "read_reports",
+    "validate_report",
 ]
