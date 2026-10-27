@@ -1,0 +1,134 @@
+name: Submit a steering vector
+description: Tell us about a steering vector you've made or found. No git needed. We'll turn it into an index entry.
+title: "[Vector] "
+labels: ["vector-submission"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing! Fill in what you know. Only the fields marked required are needed, and partial information is still useful.
+
+        Modulo lets a model steer its own activations. Your vector stays hosted where it is (e.g. your HuggingFace repo). We store a pointer pinned by its sha256 and credit you in the index. New entries start as **community**. After a maintainer runs a GPU check and reviews the outputs, an entry can become **verified**. See [CONTRIBUTING.md](https://github.com/EigenformAI/modulo/blob/main/CONTRIBUTING.md) for details.
+
+  - type: input
+    id: concept
+    attributes:
+      label: Concept name
+      description: Short name the model will use to call it, lowercase with underscores.
+      placeholder: e.g. honesty, formality, joy
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: HuggingFace model id the vector was extracted for (and a revision, if you know it).
+      placeholder: e.g. meta-llama/Llama-3.1-8B-Instruct
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Where the vector file is hosted
+      description: Link to the file (a HuggingFace repo is best). .safetensors preferred; .pt and .npz also accepted.
+      placeholder: https://huggingface.co/<user>/<repo>/blob/main/honesty.safetensors
+    validations:
+      required: true
+
+  - type: input
+    id: layer
+    attributes:
+      label: Layer(s)
+      description: Which decoder layer the vector is for. If the file holds one vector per layer, say so and give the recommended layer.
+      placeholder: e.g. 14 (file is [num_layers, hidden]; 14 recommended)
+    validations:
+      required: true
+
+  - type: textarea
+    id: effect
+    attributes:
+      label: What it does
+      description: What adding the vector does (+), and what subtracting it does (-).
+      placeholder: |
+        + more candid; admits uncertainty
+        - more evasive; overclaims
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: How it was extracted
+      description: e.g. mean difference of activations over contrast pairs, CAA, PCA, SAE feature, probe direction.
+    validations:
+      required: true
+
+  - type: input
+    id: license
+    attributes:
+      label: License
+      placeholder: e.g. MIT, Apache-2.0, CC-BY-4.0
+    validations:
+      required: true
+
+  - type: input
+    id: credit
+    attributes:
+      label: How you'd like to be credited
+      description: Names, handles or affiliations to list as contributors.
+    validations:
+      required: true
+
+  - type: textarea
+    id: original_setup
+    attributes:
+      label: Strength and setup you used (strongly encouraged)
+      description: |
+        Modulo measures strength as a % of the residual-stream norm at the layer, after normalizing the vector, so your numbers won't transfer directly. Tell us what you used and we'll calibrate: the coefficient, whether the vector was normalized, which positions were steered (all tokens / generated only), and which strengths stayed coherent.
+      placeholder: e.g. unnormalized vector, coefficient 4.0, all positions, coherent up to ~6
+
+  - type: textarea
+    id: failure_modes
+    attributes:
+      label: Known failure modes (strongly encouraged)
+      placeholder: e.g. collapses into repetition above 8; also makes the model more verbose
+
+  - type: input
+    id: paper
+    attributes:
+      label: Paper or write-up
+      placeholder: https://arxiv.org/abs/...
+
+  - type: input
+    id: contrast_dataset
+    attributes:
+      label: Contrast dataset or prompts
+      description: Link to the data the vector was extracted from, if public.
+
+  - type: textarea
+    id: evaluation
+    attributes:
+      label: Evaluation results
+      description: Any measurements of the effect, e.g. benchmark deltas or behavior rates.
+
+  - type: textarea
+    id: test_prompts
+    attributes:
+      label: Test prompts (up to 5)
+      description: Prompts where the effect should be easy to see, one per line. Used in our GPU check.
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Other layers you tried, related vectors, caveats, how to reach you.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have the right to share this vector under the license above.
+          required: true

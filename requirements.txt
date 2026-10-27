@@ -7,5 +7,6 @@ bitsandbytes
 huggingface_hub
 numpy
 pyyaml
+safetensors
 torch>=2.4
 pytest

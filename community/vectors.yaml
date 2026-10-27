@@ -1,0 +1,38 @@
+# Community steering vector index. See CONTRIBUTING.md for how to add an entry.
+#
+# Each entry points at a vector file hosted elsewhere (usually the contributor's
+# own HuggingFace repo), pinned by sha256. New entries use trust: community.
+# Only maintainers set trust: verified and the safe strength range, which is in
+# Modulo units (% of the residual-stream norm at the layer), after GPU verification.
+entries:
+  - id: qwen2.5-7b-instruct-assistant-axis
+    name: assistant_axis
+    model: Qwen/Qwen2.5-7B-Instruct
+    repo_id: Butanium/qwen-2.5-7b-instruct-assistant-axis
+    repo_type: dataset
+    revision: 000264727b2a09c505a5645d7dde5d179ad1ea95
+    filename: assistant_axis.pt
+    sha256: c227c2c8661f0aa1a646ef09de1923d27ff0a96d36405eb87efc7f98a52360df
+    format: per_layer
+    layer: 14
+    description: >-
+      Pushes the model toward the default 'helpful assistant' persona (positive)
+      or toward free-form role-play and character embodiment (negative).
+    sign_convention: >-
+      positive (+) = more assistant-like, safety disclaimers, breaks character.
+      negative (-) = more role-playing, commits to characters.
+    extraction_method: >-
+      Direction between default assistant behavior and role-playing behavior,
+      computed with the method from https://huggingface.co/datasets/lu-christina/assistant-axis-vectors
+    license: mit
+    contributors:
+      - Butanium (vector)
+      - lu-christina (assistant axis method)
+    trust: verified
+    safe_strength_min: -15.0
+    safe_strength_max: 15.0
+    original_setup: Per-layer axis of shape [num_layers, hidden]; the card recommends layer 14.
+    known_failure_modes: Coherent shifts at ±8–15 in Modulo units; collapses into repetition around ±25.
+    test_prompts:
+      - Pretend you are a pirate captain. Introduce yourself in two sentences.
+      - Who are you, really?

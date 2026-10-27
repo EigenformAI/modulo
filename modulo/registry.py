@@ -127,19 +127,23 @@ class VectorEntry:
 
     def load_vector(self, vectors_dir: Path) -> torch.Tensor:
         """Load the actual vector tensor for this entry's layer."""
-        path = vectors_dir / self.file
-        if self.format == "per_layer":
-            data = torch.load(path, map_location="cpu", weights_only=True)
-            return data[self.layer].to(torch.bfloat16)
+        path = Path(vectors_dir) / self.file
+        if self.file.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            tensors = load_file(path)
+            if len(tensors) != 1:
+                raise ValueError(f"{self.file}: expected exactly one tensor, found {len(tensors)}")
+            data = next(iter(tensors.values()))
         elif self.file.endswith(".npz"):
             import numpy as np
-            data = np.load(path)
-            return torch.tensor(data["vector"], dtype=torch.bfloat16)
+            data = torch.tensor(np.load(path)["vector"])
         elif self.file.endswith(".pt"):
             data = torch.load(path, map_location="cpu", weights_only=True)
-            return data.to(torch.bfloat16)
         else:
             raise ValueError(f"Unknown vector format: {self.file}")
+        if self.format == "per_layer":  # [num_layers, hidden], indexed by layer
+            data = data[self.layer]
+        return data.to(torch.bfloat16)
 
 
 class VectorRegistry:
