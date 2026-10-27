@@ -15,8 +15,8 @@ import config  # sets HF_HOME before transformers is imported
 from steering_vectors import train_steering_vector
 
 from load_model import load_model_and_tokenizer
-from pharmacopoeia import VectorRegistry, save_and_register
-from pharmacopoeia.registry import registry_dir_for
+from modulo import VectorRegistry, save_and_register
+from modulo.registry import registry_dir_for
 
 # CAA dataset location — clone from https://github.com/nrimsky/CAA
 # Override with CAA_DATA_ROOT env var if you cloned elsewhere.

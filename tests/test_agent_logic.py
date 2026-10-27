@@ -4,10 +4,10 @@ No model is loaded; SteeringAgent runs against a stub registry.
 """
 import pytest
 
-import pharmacopoeia.agent as A
-from pharmacopoeia.agent import (COOLDOWN_TURNS, DECAY_FACTOR, SteeringAgent, ToolCall,
+import modulo.agent as A
+from modulo.agent import (COOLDOWN_TURNS, DECAY_FACTOR, SteeringAgent, ToolCall,
                                  is_degenerate, parse_tool_calls, strip_tool_calls)
-from pharmacopoeia.registry import VectorEntry, VectorRegistry
+from modulo.registry import VectorEntry, VectorRegistry
 
 
 class StubRegistry(VectorRegistry):
@@ -149,7 +149,7 @@ def test_report_parses_string_booleans(agent):
 
 
 def test_tool_messages_include_failures_and_degeneration():
-    from pharmacopoeia.agent import StepResult, ToolResult
+    from modulo.agent import StepResult, ToolResult
     r = StepResult(prose="", raw_output="", tool_calls=[], steering_before={}, steering_after={},
                    tool_results=[ToolResult("steer", {}, False, "on cooldown")],
                    degenerate_output="loop loop")

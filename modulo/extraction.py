@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pharmacopoeia.registry import VectorEntry, VectorRegistry
+from modulo.registry import VectorEntry, VectorRegistry
 
 
 # Diverse extraction questions that elicit different responses depending on persona.
@@ -157,5 +157,5 @@ def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry,
         )
         save_and_register(registry, name, axis, layer, spec["description"],
                           spec["sign_convention"],
-                          source="auto-extracted via pharmacopoeia (contrastive system prompts)")
+                          source="auto-extracted via modulo (contrastive system prompts)")
     print(f"\n[extract_auto] Done. {len(STARTER_VECTORS)} vectors saved to {vectors_dir}")

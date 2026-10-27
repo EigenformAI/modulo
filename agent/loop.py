@@ -1,9 +1,9 @@
 """Standalone demo loop for the self-steering agent.
 
-This is a thin wrapper around the pharmacopoeia library. For real agent
+This is a thin wrapper around the modulo library. For real agent
 integration, import SteeringAgent directly:
 
-    from pharmacopoeia import SteeringAgent
+    from modulo import SteeringAgent
 
 Usage:
     python -m agent.loop                  # interactive REPL
@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config  # sets HF_HOME before transformers is imported
-from pharmacopoeia import SteeringAgent
+from modulo import SteeringAgent
 from load_model import load_model_and_tokenizer
 
 

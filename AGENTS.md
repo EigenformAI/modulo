@@ -11,7 +11,7 @@ A self-steering agent library: gives any local HF model the ability to steer its
 ### 1. As a library (for existing agent harnesses)
 
 ```python
-from pharmacopoeia import SteeringAgent
+from modulo import SteeringAgent
 
 agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers
 result = agent.step(messages)             # -> StepResult
@@ -39,7 +39,7 @@ The agent harness calls `agent.step(messages)` each turn instead of `model.gener
 ## Quick start (3 commands)
 
 ```bash
-git clone <repo-url> && cd pharmacopoeia
+git clone <repo-url> && cd modulo
 ./setup.sh
 ./run.sh --auto --max-turns 8 --seed "Hi! You can steer your own activations. Try it."
 ```
@@ -48,10 +48,10 @@ git clone <repo-url> && cd pharmacopoeia
 
 The library uses a **bundle + extract** strategy:
 
-1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
+1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `modulo/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
 2. **Auto-extract**: If no bundled vectors exist, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
 
-Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `PHARMACOPOEIA_VECTORS_DIR`.
+Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `MODULO_VECTORS_DIR`.
 
 To add your own vectors, extract and register them in one step, then check them:
 
@@ -71,7 +71,7 @@ Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while st
 ## Library API
 
 ```python
-from pharmacopoeia import SteeringAgent, VectorRegistry, extract_vector
+from modulo import SteeringAgent, VectorRegistry, extract_vector
 
 # Basic: auto-detect model, auto-source vectors
 agent = SteeringAgent(model, tokenizer)
@@ -118,7 +118,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 ## Adding bundled vectors for a new model
 
 1. Publish vectors to a HuggingFace dataset
-2. Add an entry to `BUNDLED_VECTORS` in `pharmacopoeia/registry.py`:
+2. Add an entry to `BUNDLED_VECTORS` in `modulo/registry.py`:
 
 ```python
 "meta-llama/Llama-3.1-8B-Instruct": {
@@ -138,7 +138,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 ## Safety rails (built in)
 
 - Vectors decay 0.85× per turn (after their first steered turn) and expire below 0.1 strength
-- Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `pharmacopoeia/agent.py`), plus per-vector ranges
+- Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `modulo/agent.py`), plus per-vector ranges
 - Cooldown: after an explicit or automatic drop, a vector can't be re-applied for the next 2 turns (natural expiry has no cooldown)
 - Degeneration detector: if steered output is repetitive, all vectors are dropped, the turn is regenerated unsteered, and the model is told. It catches repetition loops, not non-repetitive word salad.
 - Kill switch: Ctrl-C stops after the current turn; a second Ctrl-C (or Ctrl-C at the input prompt) stops immediately
@@ -149,10 +149,10 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 |------|---------|
 | `setup.sh` | Install + download vector + sanity check |
 | `run.sh` | Start a standalone demo session |
-| `pharmacopoeia/__init__.py` | Public API exports |
-| `pharmacopoeia/agent.py` | `SteeringAgent` class (core) |
-| `pharmacopoeia/registry.py` | `VectorRegistry`, bundled vector manifest |
-| `pharmacopoeia/extraction.py` | Vector extraction (manual + auto) |
+| `modulo/__init__.py` | Public API exports |
+| `modulo/agent.py` | `SteeringAgent` class (core) |
+| `modulo/registry.py` | `VectorRegistry`, bundled vector manifest |
+| `modulo/extraction.py` | Vector extraction (manual + auto) |
 | `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |
@@ -160,7 +160,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 | `extract_contrastive.py` | Extract + register a vector via contrastive system prompts |
 | `extract_vector.py` | Extract + register a CAA vector |
 | `verify_vector.py` | Compare baseline vs ±strength outputs for a registered vector |
-| `pharmacopoeia_catalog.yaml` | Discovery catalog of 26+ vector sources |
+| `modulo_catalog.yaml` | Discovery catalog of 26+ vector sources |
 | `replay.py` | Replay a session log as a timeline |
 
 ## Tests

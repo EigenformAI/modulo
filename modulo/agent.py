@@ -2,7 +2,7 @@
 the ability to steer its own activations.
 
 Usage:
-    from pharmacopoeia import SteeringAgent
+    from modulo import SteeringAgent
 
     agent = SteeringAgent(model, tokenizer)
     result = agent.step(messages)          # -> StepResult
@@ -21,7 +21,7 @@ from typing import Optional
 
 import torch
 
-from pharmacopoeia.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
+from modulo.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
 
 
 # --- Safety rails (tunable) ---
@@ -285,7 +285,7 @@ class SteeringAgent:
                       the model (downloads bundled vectors or auto-extracts).
             model_name: model name for vector lookup (auto-detected from config if None)
             auto_extract: if True and no bundled vectors exist, extract starter vectors
-            vectors_dir: base vectors directory (default: PHARMACOPOEIA_VECTORS_DIR
+            vectors_dir: base vectors directory (default: MODULO_VECTORS_DIR
                          env var, else the repo's vectors/ directory)
         """
         self.model = model

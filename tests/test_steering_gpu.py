@@ -14,7 +14,7 @@ if not torch.cuda.is_available():
 
 import config  # sets HF_HOME before transformers is imported
 from load_model import load_model_and_tokenizer
-from pharmacopoeia import SteeringAgent
+from modulo import SteeringAgent
 
 VECTOR = "assistant_axis"
 STRENGTH = 12.0
