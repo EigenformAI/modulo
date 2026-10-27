@@ -71,7 +71,8 @@ def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: 
         else:
             logger.log({"type": "tool_error", "turn": turn, "name": r.name, "message": r.message})
     if result.steering_before != result.steering_after:
-        logger.log({"type": "decay", "turn": turn, "active_vectors": result.steering_after})
+        # Steering changed this turn (steer/drop calls, decay, or expiry)
+        logger.log({"type": "steering_state", "turn": turn, "active_vectors": result.steering_after})
     return result
 
 
@@ -90,8 +91,10 @@ def main():
     messages = []
     if args.seed:
         messages.append({"role": "user", "content": args.seed})
+        logger.log_turn(1, "user", args.seed)
         print(f"\n[seed] {args.seed}\n")
 
+    # Inputs (user, tool results, nudges) are logged under the turn they feed into
     turn = 0
     while turn < args.max_turns and not kill.killed:
         if not messages or messages[-1]["role"] not in ("user", "tool"):
@@ -105,7 +108,7 @@ def main():
             if not user_input or user_input.lower() in ("quit", "exit"):
                 break
             messages.append({"role": "user", "content": user_input})
-            logger.log_turn(turn, "user", user_input)
+            logger.log_turn(turn + 1, "user", user_input)
 
         print(f"\n--- Turn {turn+1} ---")
         print(f"Steering status:\n{agent.status()}")
@@ -119,12 +122,12 @@ def main():
             # Tool results go straight back to the model, which gets the next turn
             for m in tool_messages:
                 print(f"[tool] {m['content']}")
-                logger.log_turn(turn, "tool", m["content"])
+                logger.log_turn(turn + 1, "tool", m["content"])
             messages.extend(tool_messages)
         elif args.auto:
             nudge = "(You can continue experimenting with steer if you like, or just talk.)"
             messages.append({"role": "user", "content": nudge})
-            logger.log_turn(turn, "user", nudge)
+            logger.log_turn(turn + 1, "user", nudge)
 
     print(f"\n[session ended after {turn} turns]")
     print(f"[log saved to {logger.log_path}]")

@@ -44,8 +44,8 @@ def replay(log_path: str):
             print(f"[T{turn}] REPORT: {e.get('concept')} worked={e.get('worked')} — {e.get('notes')}")
         elif t == "tool_error":
             print(f"[T{turn}] TOOL ERROR: {e.get('name')} — {e.get('message', '')}")
-        elif t == "decay":
-            print(f"[T{turn}] DECAY: {e.get('active_vectors')}")
+        elif t in ("steering_state", "decay"):  # "decay" in older logs
+            print(f"[T{turn}] STEERING: {e.get('active_vectors')}")
         elif t == "degeneration":
             print(f"[T{turn}] DEGENERATION DETECTED (dropped {e.get('dropped', '?')}): {e.get('snippet', '')[:100]}...")
         print()

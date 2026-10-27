@@ -19,7 +19,13 @@ messages += [{"role": "assistant", "content": result.raw_output}]
 messages += result.tool_messages()        # tool results back to the model
 ```
 
-The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`, then appends the assistant output and `result.tool_messages()` (role `tool`) so the model sees whether its calls worked. If there are tool messages, give the model the next turn. Steering is transparent — the harness doesn't need to know about hooks or vectors.
+Install it into the harness's environment with `pip install -e /path/to/modulo`. Keep the install editable so the default `vectors/` directory still resolves to the repo (or set `MODULO_VECTORS_DIR`).
+
+The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`, then appends the assistant output and `result.tool_messages()` (role `tool`) so the model sees whether its calls worked. If there are tool messages, give the model the next turn. If `messages` starts with a system message, it is merged into the steering system prompt. Steering is transparent — the harness doesn't need to know about hooks or vectors.
+
+`agent.apply()` / `agent.drop()` called between steps behave like the model's own tool calls: an applied vector gets one full-strength steered turn, and a drop blocks re-applying for `COOLDOWN_TURNS` turns.
+
+Chat templates must accept `system` and `tool` roles (Qwen, Llama-3.x, recent Mistral do). Gemma-2 rejects both, so it isn't supported yet.
 
 ### 2. As a standalone demo
 
