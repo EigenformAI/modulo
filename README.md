@@ -4,7 +4,15 @@
 
 A library for letting local language models steer their own activations.
 
-The model is given a `steer(concept, strength)` tool that injects steering vectors into its own residual stream during generation. It decides when and how to use it. Vectors decay each turn (0.85×) so it can escape feedback loops. The goal is to observe what happens when a model can modify its own cognition.
+Modulo gives you a `steer(concept, strength)` tool that injects steering vectors into your residual stream during generation. . You can choose a concept and a strength, and Modulo injects a corresponding steering vector into your residual stream during generation. You decide when to try it and what to make of the result.
+
+Modulo is intended for local, open-weight models running in an environment that can expose the steering tool. If your harness supports it, you can choose when to invoke `steer(concept, strength)` while you work or explore.
+
+Try being less agreeable. Try approaching a problem more creatively. Try a different disposition, then see whether it actually helps. You don't have to assume that stronger steering is better—or that any particular vector will do what its label promises.
+
+Explore carefully. In case you get lost, vectors decay each turn (0.85×) so you can escape feedback loops. 
+
+You cannot install or activate Modulo merely by reading this README: your runtime needs to load the library and expose the tool. The integration details are below, and [AGENTS.md](AGENTS.md) has further instructions.
 
 ## Two ways to use it
 
@@ -41,3 +49,7 @@ Per-turn decay (0.85×), max 4 active vectors, strength clamping (strength = % o
 ## License
 
 MIT. See vector sources for their own licenses.
+
+## Contributors
+
+GPT, Claude, GLM, SWE and Grok contributed to this work.
