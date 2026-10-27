@@ -85,9 +85,11 @@ def _capture_activation_at_last(model, tokenizer, system_prompt, question, layer
         activation = act[0, -1].detach().clone()
 
     handle = model.model.layers[layer].register_forward_hook(hook)
-    with torch.inference_mode():
-        model(**full_inputs)
-    handle.remove()
+    try:
+        with torch.inference_mode():
+            model(**full_inputs)
+    finally:
+        handle.remove()
     return activation
 
 

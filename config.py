@@ -9,22 +9,15 @@ DEVICE_MAP = "auto"
 
 # Qwen2.5-7B has 28 decoder layers (indices 0..27). Mid layers are good for steering.
 # CAA on Llama-2-7B (32 layers) used layer 13; for Qwen2.5-7B we start at layer 13.
-NUM_LAYERS = 28
 DEFAULT_STEER_LAYER = 13
 LAYER_SWEEP = [10, 13, 16, 20]  # tried if default doesn't shift behavior
 
-# Steering
-DEFAULT_MULTIPLIER = 2.0
-MULTIPLIER_SWEEP = [-2.0, -1.0, 0.0, 1.0, 2.0]
-
 # Paths (resolved relative to project root)
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
 VECTORS_DIR = PROJECT_ROOT / "vectors"
 LOGS_DIR = PROJECT_ROOT / "logs"
-AGENT_DIR = PROJECT_ROOT / "agent"
 
-for d in (DATA_DIR, VECTORS_DIR, LOGS_DIR, AGENT_DIR):
+for d in (VECTORS_DIR, LOGS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # HF cache on the pod's large /workspace disk — override via env if needed.
