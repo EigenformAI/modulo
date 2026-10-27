@@ -1,4 +1,4 @@
-![Project Banner](Modular Mysteries_ An Alchemical Atlas.png) 
+![Project Banner](Modular_Mysteries__An_Alchemical_Atlas.png) 
 
 # Modulo
 
