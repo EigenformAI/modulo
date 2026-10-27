@@ -128,14 +128,14 @@ class VectorEntry:
         """Load the actual vector tensor for this entry's layer."""
         path = vectors_dir / self.file
         if self.format == "per_layer":
-            data = torch.load(path, weights_only=True)
+            data = torch.load(path, map_location="cpu", weights_only=True)
             return data[self.layer].to(torch.bfloat16)
         elif self.file.endswith(".npz"):
             import numpy as np
             data = np.load(path)
             return torch.tensor(data["vector"], dtype=torch.bfloat16)
         elif self.file.endswith(".pt"):
-            data = torch.load(path, weights_only=True)
+            data = torch.load(path, map_location="cpu", weights_only=True)
             return data.to(torch.bfloat16)
         else:
             raise ValueError(f"Unknown vector format: {self.file}")

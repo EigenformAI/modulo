@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modulo"
+version = "0.1.0"
+description = "Self-steering for local language models: let a model steer its own activations."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.46,<5",
+    "accelerate>=1.0",
+    "huggingface_hub",
+    "numpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# Extra packages used by the repo's scripts (CAA extraction, quantization) and tests
+scripts = ["steering-vectors>=0.12", "datasets>=3.0", "scipy", "bitsandbytes"]
+test = ["pytest"]
+
+[tool.setuptools]
+# Only the library is installable; the demo, scripts and config.py stay repo-local.
+# Install editable (pip install -e .) so the default vectors/ dir resolves to this repo.
+packages = ["modulo"]

@@ -2,7 +2,10 @@
 
 No model is loaded; SteeringAgent runs against a stub registry.
 """
+from contextlib import nullcontext
+
 import pytest
+import torch
 
 import modulo.agent as A
 from modulo.agent import (COOLDOWN_TURNS, DECAY_FACTOR, SteeringAgent, ToolCall,
@@ -85,7 +88,13 @@ def test_strength_clamped_to_entry_and_global_cap(agent):
     assert agent.active["a"].current_strength == cap
 
 
+def in_step(agent):
+    """Put the agent where step() runs tool calls: after generation, before decay."""
+    agent._turn_generated = True
+
+
 def test_full_strength_on_first_turn_then_decays(agent):
+    in_step(agent)
     agent.apply("a", 5.0)
     agent.decay()  # end of the turn steer was called; next turn runs at full strength
     assert agent.active["a"].current_strength == 5.0
@@ -94,11 +103,37 @@ def test_full_strength_on_first_turn_then_decays(agent):
 
 
 def test_cooldown_blocks_exactly_cooldown_turns(agent):
+    in_step(agent)
     agent.apply("a", 1.0)
     assert agent.drop("a")[0]
     agent.decay()
     blocked = 0
     for _ in range(COOLDOWN_TURNS + 3):
+        if agent.apply("a", 1.0)[0]:
+            break
+        blocked += 1
+        agent.decay()
+    assert blocked == COOLDOWN_TURNS
+
+
+def test_manual_apply_between_steps_gets_one_full_strength_turn(agent):
+    agent.apply("a", 5.0)  # harness call before step()
+    assert "turn 1" in agent.status()
+    assert agent.active["a"].current_strength == 5.0  # strength used for this turn's generation
+    in_step(agent)
+    agent.decay()
+    assert agent.active["a"].current_strength == pytest.approx(5.0 * DECAY_FACTOR)
+
+
+def test_manual_drop_between_steps_blocks_exactly_cooldown_turns(agent):
+    in_step(agent)
+    agent.apply("a", 1.0)
+    agent.decay()
+    assert agent.drop("a")[0]  # harness call before step()
+    assert f"{COOLDOWN_TURNS} more turns" in agent.status()
+    blocked = 0
+    for _ in range(COOLDOWN_TURNS + 3):
+        in_step(agent)
         if agent.apply("a", 1.0)[0]:
             break
         blocked += 1
@@ -127,6 +162,8 @@ def test_max_active_vectors(agent):
 @pytest.mark.parametrize("args", [
     {"concept": "a", "strength": "high"},
     {"concept": "a", "strength": "nan"},
+    {"concept": "a", "strength": "inf"},
+    {"concept": "a", "strength": "-inf"},
     {"concept": ["a"], "strength": 1},
     {"strength": 1},
     {"concept": "nope", "strength": 1},
@@ -157,3 +194,37 @@ def test_tool_messages_include_failures_and_degeneration():
     assert [m["role"] for m in msgs] == ["tool", "tool"]
     assert "degeneration_detected" in msgs[0]["content"]
     assert '"ok": false' in msgs[1]["content"] and "on cooldown" in msgs[1]["content"]
+
+
+# --- prompt building ---
+
+def test_harness_system_prompt_is_merged(agent):
+    full = agent._full_messages([{"role": "system", "content": "HARNESS RULES"},
+                                 {"role": "user", "content": "hi"}])
+    assert [m["role"] for m in full] == ["system", "user"]
+    assert full[0]["content"].startswith("HARNESS RULES\n\n")
+    assert "self-steering experiment" in full[0]["content"]
+
+
+def test_degenerate_turn_regenerates_with_updated_prompt(agent, monkeypatch):
+    """The unsteered retry must be built after the drops, so its prompt doesn't list them as active."""
+    class FakeInputs:
+        def __init__(self, prompt):
+            self.prompt = prompt
+            self.input_ids = torch.zeros(1, 1)
+
+    prompts, outputs = [], ["loop " * 50, "Fine now."]
+
+    def fake_generate(inputs, *args):
+        prompts.append(inputs.prompt)
+        return outputs.pop(0)
+
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs(agent._full_messages(msgs)[0]["content"]))
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    monkeypatch.setattr(agent, "_generate", fake_generate)
+
+    agent.apply("a", 5.0)
+    result = agent.step([{"role": "user", "content": "hi"}])
+    assert result.degenerate_output is not None and result.raw_output == "Fine now."
+    assert "a: +5.00" in prompts[0]
+    assert "a: +5.00" not in prompts[1] and "a: on cooldown" in prompts[1]

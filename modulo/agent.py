@@ -12,6 +12,7 @@ Usage:
     # agent.status() -> active vector status string
 """
 import json
+import math
 import re
 from collections import Counter
 from contextlib import nullcontext
@@ -293,6 +294,9 @@ class SteeringAgent:
         self.active: dict[str, ActiveVector] = {}
         self.turn = 0
         self._dropped_recently: dict[str, int] = {}
+        # True between this turn's generation and decay(). apply()/drop() calls
+        # before generation (manual control) count as the end of the previous turn.
+        self._turn_generated = False
         self._unit_vectors: dict[str, torch.Tensor] = {}
         self._residual_norms: dict[int, float] = {}
 
@@ -347,6 +351,7 @@ class SteeringAgent:
             return False, f"Too many active vectors (max {MAX_ACTIVE_VECTORS}). Drop one first."
         self.active[name] = ActiveVector(
             entry=entry, base_strength=strength, current_strength=strength,
+            turns_active=0 if self._turn_generated else 1,
             last_applied_turn=self.turn,
         )
         sign = "+" if strength >= 0 else ""
@@ -357,11 +362,12 @@ class SteeringAgent:
         if name not in self.active:
             return False, f"'{name}' is not active."
         del self.active[name]
-        self._dropped_recently[name] = self.turn
+        self._dropped_recently[name] = self.turn if self._turn_generated else self.turn - 1
         return True, f"Dropped '{name}'. On cooldown for the next {COOLDOWN_TURNS} turns."
 
     def decay(self):
         self.turn += 1
+        self._turn_generated = False
         expired = []
         for name, av in self.active.items():
             av.turns_active += 1
@@ -377,7 +383,10 @@ class SteeringAgent:
     def _unit_vector(self, entry: VectorEntry) -> torch.Tensor:
         if entry.name not in self._unit_vectors:
             v = entry.load_vector(self.registry.vectors_dir).float()
-            self._unit_vectors[entry.name] = v / v.norm()
+            norm = v.norm()
+            if norm == 0 or not torch.isfinite(norm):
+                raise ValueError(f"Vector '{entry.name}' has zero or non-finite norm; re-extract it.")
+            self._unit_vectors[entry.name] = v / norm
         return self._unit_vectors[entry.name]
 
     def residual_norm(self, layer: int) -> float:
@@ -426,7 +435,7 @@ class SteeringAgent:
                 strength = float(args.get("strength", 0))
             except (TypeError, ValueError):
                 return ToolResult(tc.name, args, False, f"'strength' must be a number, got {args.get('strength')!r}.")
-            if strength != strength:  # NaN
+            if not math.isfinite(strength):
                 return ToolResult(tc.name, args, False, "'strength' must be a finite number.")
             ok, msg = self.apply(concept, strength)
         elif tc.name == "drop":
@@ -450,6 +459,20 @@ class SteeringAgent:
             )
         return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
+    def _full_messages(self, messages: list[dict]) -> list[dict]:
+        sys_prompt = self.build_system_prompt()
+        if messages and messages[0].get("role") == "system":
+            # Merge the harness's own system prompt; many chat templates reject
+            # or mishandle a second system message.
+            sys_prompt = messages[0]["content"] + "\n\n" + sys_prompt
+            messages = messages[1:]
+        return [{"role": "system", "content": sys_prompt}] + messages
+
+    def _encode(self, messages: list[dict]):
+        text = self.tokenizer.apply_chat_template(
+            self._full_messages(messages), tokenize=False, add_generation_prompt=True)
+        return self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
     def step(self, messages: list[dict], max_new_tokens: int = 300,
              temperature: float = 0.7, top_p: float = 0.9) -> StepResult:
         """Run one turn: build prompt, generate (steered), parse tool calls, apply them, decay.
@@ -460,16 +483,14 @@ class SteeringAgent:
 
         Returns: StepResult with prose, raw output, tool calls/results, and steering state
         """
-        sys_prompt = self.build_system_prompt()
-        full_messages = [{"role": "system", "content": sys_prompt}] + messages
-        text = self.tokenizer.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        inputs = self._encode(messages)
         prompt_len = inputs.input_ids.shape[1]
 
         steering_before = {n: av.current_strength for n, av in self.active.items()}
 
         with self._build_steering_context(prompt_len):
             raw_output = self._generate(inputs, max_new_tokens, temperature, top_p)
+        self._turn_generated = True
 
         # Degeneration check (only meaningful if steering was applied)
         degenerate_output = None
@@ -477,7 +498,8 @@ class SteeringAgent:
             degenerate_output = raw_output
             for name in list(self.active.keys()):
                 self.drop(name)
-            raw_output = self._generate(inputs, max_new_tokens, temperature, top_p)
+            # Re-encode so the regenerated turn's system prompt shows the drops
+            raw_output = self._generate(self._encode(messages), max_new_tokens, temperature, top_p)
 
         tool_calls = parse_tool_calls(raw_output)
         prose = strip_tool_calls(raw_output)
