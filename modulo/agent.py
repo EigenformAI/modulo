@@ -278,17 +278,19 @@ class SteeringAgent:
 
     def __init__(self, model, tokenizer, registry: Optional[VectorRegistry] = None,
                  model_name: Optional[str] = None, auto_extract: bool = True,
-                 vectors_dir: Optional[Path] = None):
+                 vectors_dir: Optional[Path] = None, include_community: bool = False):
         """
         Args:
             model: HF causal LM (must have model.model.layers)
             tokenizer: matching tokenizer
             registry: pre-built VectorRegistry. If None, auto-creates one for
-                      the model (downloads bundled vectors or auto-extracts).
+                      the model (community index vectors, else auto-extracts).
             model_name: model name for vector lookup (auto-detected from config if None)
-            auto_extract: if True and no bundled vectors exist, extract starter vectors
+            auto_extract: if True and the model has no vectors, extract starter vectors
             vectors_dir: base vectors directory (default: MODULO_VECTORS_DIR
                          env var, else the repo's vectors/ directory)
+            include_community: also offer unverified community-index vectors
+                         (default: verified only). Ignored if registry is given.
         """
         self.model = model
         self.tokenizer = tokenizer
@@ -313,6 +315,7 @@ class SteeringAgent:
             self.registry = VectorRegistry.for_model(
                 model_name, base_dir=vectors_dir or DEFAULT_VECTORS_DIR,
                 auto_extract=auto_extract, model=model, tokenizer=tokenizer,
+                include_community=include_community,
             )
 
     def _clamp(self, entry: VectorEntry, strength: float) -> float:

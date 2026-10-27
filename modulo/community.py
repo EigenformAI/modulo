@@ -5,15 +5,20 @@ repo), pinned by sha256. New entries come in at trust level "community"; a
 maintainer promotes one to "verified" after reviewing GPU verification output
 and setting its safe strength range in Modulo units.
 
-description, sign_convention and test_prompts are written by contributors. Only
-"verified" entries' text should ever reach a model's prompt.
+The library loads a model's verified entries by default and community entries
+only on request (include_community=True). description, sign_convention and
+test_prompts are written by contributors, so community entries reach the
+model's prompt marked as unverified.
 """
+import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 import torch
+import yaml
 
 from modulo.registry import VectorEntry
 from modulo.reports import file_sha256
@@ -24,6 +29,13 @@ REPO_TYPES = ("model", "dataset")
 FILE_SUFFIXES = (".safetensors", ".pt", ".npz")
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
+
+# The repo's copy of the index; users get new entries by updating the repo.
+DEFAULT_INDEX_PATH = Path(os.environ.get(
+    "MODULO_INDEX_PATH", Path(__file__).resolve().parent.parent / "community" / "vectors.yaml"))
+# Strength range for opted-in community vectors that no maintainer has calibrated
+COMMUNITY_DEFAULT_RANGE = 8.0
+UNVERIFIED_PREFIX = "[Unverified community vector] "
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
@@ -177,3 +189,79 @@ def check_vector_file(entry: dict, path: Path, hidden_size: Optional[int] = None
     if not torch.isfinite(norm) or norm == 0:
         return [f"{label}: vector norm is {norm.item()} (must be finite and non-zero)"]
     return []
+
+
+def load_index(path: Path) -> dict:
+    path = Path(path)
+    if not path.exists():
+        return {"entries": []}
+    with open(path) as f:
+        return yaml.safe_load(f) or {"entries": []}
+
+
+def fetch_vector(entry: dict) -> tuple[Optional[Path], Optional[str]]:
+    """Download an entry's file into the HF cache: (path, None) or (None, problem)."""
+    from huggingface_hub import HfApi, hf_hub_download
+    kwargs = dict(repo_id=entry["repo_id"], repo_type=entry["repo_type"], revision=entry.get("revision"))
+    try:
+        [info] = HfApi().get_paths_info(paths=[entry["filename"]], **kwargs)
+        if getattr(info, "size", None) is None:
+            return None, f"{entry['id']}: '{entry['filename']}' is not a file in {entry['repo_id']}"
+        if info.size > MAX_FILE_BYTES:
+            return None, f"{entry['id']}: file is {info.size / 1e6:.0f} MB (max {MAX_FILE_BYTES / 1e6:.0f} MB)"
+        return Path(hf_hub_download(filename=entry["filename"], **kwargs)), None
+    except Exception as e:
+        return None, f"{entry['id']}: couldn't download {entry['repo_id']}/{entry['filename']} ({type(e).__name__}: {e})"
+
+
+def _to_vector_entry(entry: dict, file: str) -> VectorEntry:
+    verified = entry["trust"] == "verified"
+    if "safe_strength_min" in entry:
+        lo, hi = entry["safe_strength_min"], entry["safe_strength_max"]
+    else:
+        lo, hi = -COMMUNITY_DEFAULT_RANGE, COMMUNITY_DEFAULT_RANGE
+    return VectorEntry(
+        name=entry["name"], file=file, layer=entry["layer"],
+        description=("" if verified else UNVERIFIED_PREFIX) + entry["description"],
+        safe_strength_min=lo, safe_strength_max=hi, sign_convention=entry["sign_convention"],
+        source=f"index:{entry['id']} ({entry['trust']})", format=entry["format"],
+    )
+
+
+def index_entries_for(model_name: str, vectors_dir: Path, index_path: Optional[Path] = None,
+                      include_community: bool = False, hidden_size: Optional[int] = None,
+                      num_layers: Optional[int] = None) -> tuple[list[VectorEntry], list[str]]:
+    """The index's usable vectors for a model, with their files cached in vectors_dir.
+
+    Files already in vectors_dir are reused if their sha256 matches; a local
+    file that doesn't match is reported and never overwritten. Downloads are
+    checked before they're copied in. Returns (entries, notes for the user).
+    """
+    index_path = Path(index_path or DEFAULT_INDEX_PATH)
+    index = load_index(index_path)
+    errors = validate_index(index)
+    if errors:
+        return [], [f"ignoring invalid index {index_path}: {errors[0]}"]
+    trusts = ("verified", "community") if include_community else ("verified",)
+    entries, notes = [], []
+    for e in index["entries"]:
+        if e["model"] != model_name or e["trust"] not in trusts:
+            continue
+        local = Path(vectors_dir) / Path(e["filename"]).name
+        if local.exists():
+            path = local
+        else:
+            path, err = fetch_vector(e)
+            if err:
+                notes.append(err)
+                continue
+        problems = check_vector_file(e, path, hidden_size=hidden_size, num_layers=num_layers)
+        if problems:
+            kept = f" (local file {local} left as is; delete it to re-download)" if path == local else ""
+            notes.append(problems[0] + kept)
+            continue
+        if path != local:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(path, local)
+        entries.append(_to_vector_entry(e, local.name))
+    return entries, notes

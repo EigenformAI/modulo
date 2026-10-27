@@ -52,10 +52,11 @@ git clone <repo-url> && cd modulo
 
 ## How vectors are sourced
 
-The library uses a **bundle + extract** strategy:
+At startup the agent combines three sources for its model:
 
-1. **Bundled**: If precomputed vectors exist for the model (listed in `BUNDLED_VECTORS` in `modulo/registry.py`), they're auto-downloaded from HuggingFace. Currently bundled: Qwen2.5-7B-Instruct (assistant_axis).
-2. **Auto-extract**: If no bundled vectors exist, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
+1. **Your own vectors**: `vectors/<model_slug>/registry.yaml`, where extraction scripts register what you make. These win over an index vector of the same name.
+2. **The community index**: `community/vectors.yaml` in the repo (update the repo to get new entries; override with `MODULO_INDEX_PATH`). `verified` entries are loaded by default; unverified `community` entries only with `SteeringAgent(..., include_community=True)`, with a ±8 range unless a maintainer set one, and marked as unverified in the model's prompt. Files are downloaded from HuggingFace at their pinned revision, checked against their sha256 (and the model's dimensions), and cached in `vectors/<model_slug>/`. A cached file that doesn't match is reported and never overwritten. Index entries are kept in memory and never written to `registry.yaml`. Currently: Qwen2.5-7B-Instruct (assistant_axis).
+3. **Auto-extract**: if the model ends up with no vectors, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
 
 Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `MODULO_VECTORS_DIR`.
 
@@ -85,8 +86,11 @@ agent = SteeringAgent(model, tokenizer)
 # Explicit model name
 agent = SteeringAgent(model, tokenizer, model_name="Qwen/Qwen2.5-3B-Instruct")
 
-# Disable auto-extraction (use only bundled or pre-existing vectors)
+# Disable auto-extraction (use only your own and index vectors)
 agent = SteeringAgent(model, tokenizer, auto_extract=False)
+
+# Also offer unverified community-index vectors
+agent = SteeringAgent(model, tokenizer, include_community=True)
 
 # Manual vector extraction
 vec = extract_vector(model, tokenizer,
@@ -127,25 +131,9 @@ Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports
 
 The format is defined in `modulo/reports.py`. `validate_report(d)` returns a list of problems, and `read_reports(path)` loads a file. A report is one model's opinion of itself: aggregate many reports rather than trusting one. Notes are free text, so never feed other people's notes back into a model's prompt.
 
-## Adding bundled vectors for a new model
+## Adding vectors for a new model
 
-1. Publish vectors to a HuggingFace dataset
-2. Add an entry to `BUNDLED_VECTORS` in `modulo/registry.py`:
-
-```python
-"meta-llama/Llama-3.1-8B-Instruct": {
-    "repo_id": "your-org/llama-3.1-8b-vectors",
-    "filename": "assistant_axis.pt",
-    "repo_type": "dataset",
-    "vector_name": "assistant_axis",
-    "layer": 16,
-    "description": "...",
-    "sign_convention": "...",
-    "safe_strength_min": -15.0,  # % of residual norm; also capped by MAX_STRENGTH
-    "safe_strength_max": 15.0,
-    "format": "per_layer",
-},
-```
+Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or use the submission form). See [CONTRIBUTING.md](CONTRIBUTING.md) for the fields, the automatic checks and how entries become `verified`.
 
 ## Safety rails (built in)
 
@@ -163,7 +151,7 @@ The format is defined in `modulo/reports.py`. `validate_report(d)` returns a lis
 | `run.sh` | Start a standalone demo session |
 | `modulo/__init__.py` | Public API exports |
 | `modulo/agent.py` | `SteeringAgent` class (core) |
-| `modulo/registry.py` | `VectorRegistry`, bundled vector manifest |
+| `modulo/registry.py` | `VectorRegistry`: your own vectors plus the community index for a model |
 | `modulo/extraction.py` | Vector extraction (manual + auto) |
 | `modulo/reports.py` | Report format, validation, `reports.jsonl` read/write |
 | `modulo/community.py` | Community vector index: entry format and file checks |
