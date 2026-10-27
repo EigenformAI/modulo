@@ -166,6 +166,11 @@ The format is defined in `modulo/reports.py`. `validate_report(d)` returns a lis
 | `modulo/registry.py` | `VectorRegistry`, bundled vector manifest |
 | `modulo/extraction.py` | Vector extraction (manual + auto) |
 | `modulo/reports.py` | Report format, validation, `reports.jsonl` read/write |
+| `modulo/community.py` | Community vector index: entry format and file checks |
+| `community/vectors.yaml` | Community vector index (pointers to hosted vectors, with trust levels) |
+| `community/check_vectors.py` | Checks the index; run by CI on PRs touching `community/` |
+| `community/gpu_verify.py` | Maintainer GPU check: strength sweep + suggested safe range |
+| `CONTRIBUTING.md` | How to contribute vectors (issue form or PR) |
 | `agent/loop.py` | Standalone demo loop (thin wrapper) |
 | `config.py` | Model name, paths, layer defaults |
 | `load_model.py` | Load Qwen2.5-7B-Instruct + tokenizer |

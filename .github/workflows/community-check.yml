@@ -1,0 +1,44 @@
+name: Community vector check
+
+on:
+  pull_request:
+    paths:
+      - "community/**"
+
+# Read-only token and no secrets, so this is safe to run on PRs from forks.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # The checker and library come from the base branch so a PR can't change
+      # the checks that judge it; only the PR's index is read.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install pyyaml numpy huggingface_hub safetensors
+      - name: Check index
+        run: |
+          # Until the checker exists on the base branch (the PR adding it), use the PR's copy
+          checker=base/community/check_vectors.py
+          [ -f "$checker" ] || checker=pr/community/check_vectors.py
+          python "$checker" --index pr/community/vectors.yaml \
+            --base-index base/community/vectors.yaml --summary summary.md
+      - name: Summary
+        if: always()
+        run: '[ -f summary.md ] && cat summary.md >> "$GITHUB_STEP_SUMMARY" || true'
