@@ -184,7 +184,8 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
 - **First run is slow for new models**: Auto-extraction generates 3 vectors (~2 min). Subsequent runs load from disk.
 - **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
-- **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range in its `registry.yaml` or lower `MAX_STRENGTH`.
+- **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range (in `registry.yaml` for your own vectors, in `community/vectors.yaml` for index vectors) or lower `MAX_STRENGTH`.
+- **An index vector doesn't load**: Check the `[registry]` lines printed at startup. A sha256 mismatch on a cached file means the file in `vectors/<model_slug>/` isn't the one the index pins; delete it to re-download. Unverified entries also need `include_community=True`.
 - **Steering seems to have no effect**: Run `python verify_vector.py --vector <name> --strength 12`. If the ± outputs match the baseline, the vector (not the steering) is the problem.
 - **Model downloaded twice**: `HF_HOME` is set to `/workspace/hf_cache` when `/workspace` exists, which only works if `config` is imported before `transformers` (the entry points do this). Older runs may have left a copy in `~/.cache/huggingface`.
 - **`model.model.layers` not found**: The library assumes standard HF architecture. Custom model classes may need adapter code.
