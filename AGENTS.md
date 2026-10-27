@@ -73,7 +73,7 @@ Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while st
 
 ## Strength units
 
-`strength` is a percentage of the typical residual-stream norm at the vector's layer. Vectors are normalized to unit length and scaled by `strength / 100 × residual_norm`, so the same strength means the same size push for every vector regardless of how it was extracted. On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–15 and collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
+`strength` is a percentage of the typical residual-stream norm at the vector's layer. Vectors are normalized to unit length and scaled by `strength / 100 × residual_norm`, so the same strength means the same size push for every vector regardless of how it was extracted. On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–12; at +15 it turns muddled (so its range is -15 to +12), and it collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
 
 ## Library API
 
