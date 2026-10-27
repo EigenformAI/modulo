@@ -124,7 +124,7 @@ def main():
                 print(f"[tool] {m['content']}")
                 logger.log_turn(turn + 1, "tool", m["content"])
             messages.extend(tool_messages)
-        elif args.auto:
+        elif args.auto and turn < args.max_turns and not kill.killed:  # no nudge after the last turn
             nudge = "(You can continue experimenting with steer if you like, or just talk.)"
             messages.append({"role": "user", "content": nudge})
             logger.log_turn(turn + 1, "user", nudge)

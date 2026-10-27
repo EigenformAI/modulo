@@ -30,7 +30,7 @@ if ! pip install --break-system-packages --quiet -r requirements.txt; then
 fi
 
 # 2. Create directories
-mkdir -p "$VEC_DIR" data logs agent
+mkdir -p "$VEC_DIR" logs
 
 # 3. Download the assistant-axis steering vector (the one confirmed-working vector)
 echo ""
