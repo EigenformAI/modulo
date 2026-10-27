@@ -1,3 +1,5 @@
+![Project Banner](Modular Mysteries_ An Alchemical Atlas.png) 
+
 # Modulo
 
 A library for letting local language models steer their own activations.
