@@ -4,7 +4,7 @@
 
 A library for letting local language models steer their own activations.
 
-The model is given a `steer(concept, strength)` tool that injects steering vectors into its own residual stream during generation. It decides when and how to use it. Vectors decay each turn (0.85×) so it can escape feedback loops. The goal is to observe what happens when a model can modify its own cognition — the model equivalent of catnip.
+The model is given a `steer(concept, strength)` tool that injects steering vectors into its own residual stream during generation. It decides when and how to use it. Vectors decay each turn (0.85×) so it can escape feedback loops. The goal is to observe what happens when a model can modify its own cognition.
 
 ## Two ways to use it
 
