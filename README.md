@@ -1,4 +1,4 @@
-# Pharmacopoeia
+# Modulo
 
 A library for letting local language models steer their own activations.
 
@@ -9,7 +9,7 @@ The model is given a `steer(concept, strength)` tool that injects steering vecto
 ### As a library (for existing agent harnesses)
 
 ```python
-from pharmacopoeia import SteeringAgent
+from modulo import SteeringAgent
 
 agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers (Llama/Qwen/Mistral-style)
 result = agent.step(messages)  # -> StepResult(prose, raw_output, tool_calls, tool_results, ...)

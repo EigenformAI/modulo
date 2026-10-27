@@ -23,7 +23,7 @@ import yaml
 # Base directory for per-model vector dirs. Resolved from this file rather than
 # the working directory so library users get the same registry as run.sh.
 DEFAULT_VECTORS_DIR = Path(os.environ.get(
-    "PHARMACOPOEIA_VECTORS_DIR", Path(__file__).resolve().parent.parent / "vectors"))
+    "MODULO_VECTORS_DIR", Path(__file__).resolve().parent.parent / "vectors"))
 
 
 def _model_slug(model_name: str) -> str:
@@ -227,7 +227,7 @@ class VectorRegistry:
                 print(f"[registry] Vectors dir: {vectors_dir}")
                 print(f"[registry] Run extract_auto() with a loaded model to generate starter vectors.")
             else:
-                from pharmacopoeia.extraction import extract_auto
+                from modulo.extraction import extract_auto
                 print(f"[registry] No bundled vectors for '{model_name}'. Auto-extracting starter set...")
                 extract_auto(model, tokenizer, model_name, vectors_dir, registry)
                 registry = cls(vectors_dir)  # reload after extraction

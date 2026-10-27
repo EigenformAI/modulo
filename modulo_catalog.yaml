@@ -1,5 +1,5 @@
 schema_version: '0.1'
-project: Pharmacopoeia
+project: Modulo
 compiled: '2026-10-26'
 notes:
   - 'Discovery catalogue, not a validated or directly executable recipe collection.'

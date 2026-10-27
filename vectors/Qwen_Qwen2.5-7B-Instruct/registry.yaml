@@ -6,7 +6,7 @@
 # Strength units: percent of the typical residual-stream norm at `layer`
 # (vectors are normalized to unit length before scaling), so the same strength
 # is the same size push for every vector. Hard cap: MAX_STRENGTH in
-# pharmacopoeia/agent.py.
+# modulo/agent.py.
 #
 # Format:
 #   name:           short identifier the agent uses in steer() calls

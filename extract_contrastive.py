@@ -24,9 +24,9 @@ import argparse
 
 import config  # sets HF_HOME before transformers is imported
 from load_model import load_model_and_tokenizer
-from pharmacopoeia import VectorRegistry, extract_vector, save_and_register
-from pharmacopoeia.extraction import EXTRACTION_QUESTIONS
-from pharmacopoeia.registry import registry_dir_for
+from modulo import VectorRegistry, extract_vector, save_and_register
+from modulo.extraction import EXTRACTION_QUESTIONS
+from modulo.registry import registry_dir_for
 
 
 def main():
