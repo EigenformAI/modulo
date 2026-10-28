@@ -155,11 +155,12 @@ class VectorRegistry:
 
         Loads your own vectors from registry.yaml, then adds the model's
         verified vectors from the community index (plus unverified community
-        ones if include_community=True), downloading files as needed. If the
-        model still has no vectors and auto_extract=True, extracts a starter
-        set using contrastive system prompts.
+        ones if include_community=True), downloading files as needed. If
+        auto_extract=True, extracts any starter vectors (contrastive system
+        prompts, see extraction.STARTER_VECTORS) the model doesn't have yet.
         """
         from modulo.community import index_entries_for
+        from modulo.extraction import STARTER_VECTORS
         vectors_dir = registry_dir_for(model_name, base_dir)
         vectors_dir.mkdir(parents=True, exist_ok=True)
         registry = cls(vectors_dir)
@@ -174,19 +175,18 @@ class VectorRegistry:
             print(f"[registry] {note}")
         if registry._index_names:
             print(f"[registry] {len(registry._index_names)} vector(s) for '{model_name}' from the community index")
-        if registry.entries:
-            return registry
-
-        # No vectors for this model — auto-extract if model provided
-        if auto_extract:
+        missing = [s["name"] for s in STARTER_VECTORS if s["name"] not in registry.entries]
+        if auto_extract and missing:
             if model is None or tokenizer is None:
-                print(f"[registry] No vectors for '{model_name}' and no model provided for auto-extraction.")
-                print(f"[registry] Vectors dir: {vectors_dir}")
-                print(f"[registry] Run extract_auto() with a loaded model to generate starter vectors.")
+                if not registry.entries:
+                    print(f"[registry] No vectors for '{model_name}' and no model provided for auto-extraction.")
+                    print(f"[registry] Vectors dir: {vectors_dir}")
+                    print(f"[registry] Run extract_auto() with a loaded model to generate starter vectors.")
             else:
                 from modulo.extraction import extract_auto
-                print(f"[registry] No vectors for '{model_name}'. Auto-extracting starter set...")
-                extract_auto(model, tokenizer, model_name, vectors_dir, registry)
-                registry = cls(vectors_dir)  # reload after extraction
+                print(f"[registry] Auto-extracting {len(missing)} missing starter vector(s) for "
+                      f"'{model_name}': {', '.join(missing)}")
+                # Extracts into this registry, so index vectors stay loaded
+                extract_auto(model, tokenizer, model_name, vectors_dir, registry, only_missing=True)
 
         return registry

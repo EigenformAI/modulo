@@ -17,6 +17,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,16 @@ STRENGTH_FLOOR = 0.1
 MAX_ACTIVE_VECTORS = 4
 MAX_STRENGTH = 15.0  # assistant_axis is coherent to ~15 and collapses by ~25 (Qwen2.5-7B)
 COOLDOWN_TURNS = 2
+# A turn whose prose is this similar (word-level) to one of the last
+# REPEAT_LOOKBACK assistant turns is discarded and regenerated once.
+REPEAT_SIMILARITY = 0.8
+REPEAT_LOOKBACK = 3
+
+REPEAT_NOTICE = json.dumps({
+    "event": "repetition_detected",
+    "message": "Your output for this turn nearly repeated one of your recent turns, "
+               "so it was discarded and this turn was regenerated.",
+})
 
 # Strength is expressed as a percentage of the typical residual-stream norm at
 # the vector's layer, so the same number means the same push for every vector
@@ -72,6 +83,7 @@ class StepResult:
     steering_after: dict   # after tool calls + decay
     tool_results: list = field(default_factory=list)  # list[ToolResult]
     degenerate_output: Optional[str] = None  # steered output that was discarded, if any
+    repeated_output: Optional[str] = None  # output discarded for repeating a recent turn, if any
 
     def tool_messages(self) -> list[dict]:
         """Tool results as chat messages (role 'tool'), to append after the assistant turn."""
@@ -82,6 +94,8 @@ class StepResult:
                 "message": "Your steered output became repetitive, so all active vectors were "
                            "dropped and this turn was regenerated without steering.",
             })})
+        if self.repeated_output is not None:
+            msgs.append({"role": "tool", "content": REPEAT_NOTICE})
         for r in self.tool_results:
             msgs.append({"role": "tool", "content": json.dumps(
                 {"name": r.name, "ok": r.ok, "message": r.message})})
@@ -156,6 +170,22 @@ def is_degenerate(text: str) -> bool:
     if len(words) >= 40:
         unique_ratio = len(set(w.lower() for w in words)) / len(words)
         if unique_ratio < 0.15:
+            return True
+    return False
+
+
+def is_repeat(text: str, previous: list[str], threshold: float = REPEAT_SIMILARITY) -> bool:
+    """True if text nearly duplicates any of previous. Call on prose (tool calls stripped).
+
+    Catches loops across turns (the same answer again and again), which
+    is_degenerate() can't see because it only looks within one output.
+    """
+    words = text.split()
+    if len(words) < 20:
+        return False
+    for p in previous:
+        pw = p.split()
+        if len(pw) >= 20 and SequenceMatcher(None, words, pw, autojunk=False).ratio() >= threshold:
             return True
     return False
 
@@ -523,6 +553,16 @@ class SteeringAgent:
             # Re-encode so the regenerated turn's system prompt shows the drops
             raw_output = self._generate(self._encode(messages), max_new_tokens, temperature, top_p)
 
+        # Cross-turn loop check: retry once, steered as before, with a note saying why
+        repeated_output = None
+        previous = [strip_tool_calls(m["content"]) for m in messages
+                    if m.get("role") == "assistant"][-REPEAT_LOOKBACK:]
+        if is_repeat(strip_tool_calls(raw_output), previous):
+            repeated_output = raw_output
+            retry = self._encode(messages + [{"role": "tool", "content": REPEAT_NOTICE}])
+            with self._build_steering_context(retry.input_ids.shape[1]):
+                raw_output = self._generate(retry, max_new_tokens, temperature, top_p)
+
         tool_calls = parse_tool_calls(raw_output)
         prose = strip_tool_calls(raw_output)
         tool_results = [self._execute(tc) for tc in tool_calls]
@@ -534,4 +574,5 @@ class SteeringAgent:
             prose=prose, raw_output=raw_output, tool_calls=tool_calls,
             steering_before=steering_before, steering_after=steering_after,
             tool_results=tool_results, degenerate_output=degenerate_output,
+            repeated_output=repeated_output,
         )

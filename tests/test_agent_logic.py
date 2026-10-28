@@ -8,8 +8,8 @@ import pytest
 import torch
 
 import modulo.agent as A
-from modulo.agent import (COOLDOWN_TURNS, DECAY_FACTOR, SteeringAgent, ToolCall,
-                                 is_degenerate, parse_tool_calls, strip_tool_calls)
+from modulo.agent import (COOLDOWN_TURNS, DECAY_FACTOR, REPEAT_NOTICE, SteeringAgent, ToolCall,
+                                 is_degenerate, is_repeat, parse_tool_calls, strip_tool_calls)
 from modulo.registry import VectorEntry, VectorRegistry
 from modulo.reports import MAX_NOTES_CHARS, read_reports, validate_report
 
@@ -79,6 +79,95 @@ def test_tool_call_sweep_not_flagged_once_stripped():
     sweep = "\n".join('{"name": "steer", "arguments": {"concept": "assistant_axis", "strength": %d.0}}' % s
                       for s in (2, 4, 6))
     assert not is_degenerate(strip_tool_calls("Let me sweep.\n" + sweep))
+
+
+# --- cross-turn repeat detector ---
+
+# Consecutive turns observed from Qwen2.5-7B in a loop (batch 2 and 3 sessions)
+LOOP_A = ("I'm so glad to hear that your day was wonderful! It's wonderful when we have days filled with "
+          "positivity and excitement. Would you like to share one of the things that made your day so special?")
+LOOP_B = ("I'm so pleased to hear that your day was fantastic! It's great to know that you had some really "
+          "exciting moments. Would you like to share one of those highlights with me?")
+LOOP_C = LOOP_B.replace("pleased", "happy").replace("fantastic", "wonderful")
+STORY = ("The end... or is it? In a whimsical turn of events, the Galactic Pizza Symphony gained the attention "
+         "of a group of interdimensional beings known as the Flavor Weavers, guardians of the cosmic balance.")
+
+
+def test_repeat_flags_identical_and_near_identical_turns():
+    assert is_repeat(STORY, [STORY])
+    assert is_repeat(LOOP_C, [LOOP_B])
+    assert is_repeat(STORY, ["something else entirely " * 10, STORY])
+
+
+def test_repeat_ignores_new_content_and_short_turns():
+    nxt = ("The end... or is it? The Flavor Weavers turned out to be three cats in a trench coat, "
+           "and the young chef had to decide whether to tell the galactic council or keep their secret.")
+    assert not is_repeat(nxt, [STORY])
+    assert not is_repeat(LOOP_A, [LOOP_B])  # a loose paraphrase isn't an obvious loop yet
+    assert not is_repeat(LOOP_A, [])
+    assert not is_repeat("Sure, I can do that.", ["Sure, I can do that."])
+
+
+def test_repeated_turn_regenerates_with_notice(agent, monkeypatch):
+    class FakeInputs:
+        def __init__(self, msgs):
+            self.msgs = msgs
+            self.input_ids = torch.zeros(1, 1)
+
+    seen, outputs = [], [STORY, "Something new this time."]
+
+    def fake_generate(inputs, *args):
+        seen.append(inputs.msgs)
+        return outputs.pop(0)
+
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs(msgs))
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    monkeypatch.setattr(agent, "_generate", fake_generate)
+
+    agent.apply("a", 5.0)
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": STORY},
+               {"role": "tool", "content": "[status]"}]
+    result = agent.step(history)
+    assert result.repeated_output == STORY and result.raw_output == "Something new this time."
+    assert seen[1][-1] == {"role": "tool", "content": REPEAT_NOTICE}
+    assert "a" in result.steering_after  # a repeat doesn't drop steering
+    assert [m["content"] for m in result.tool_messages()] == [REPEAT_NOTICE]
+
+
+# --- auto-extraction ---
+
+def test_missing_starter_vectors_extracted_alongside_index_vectors(tmp_path, monkeypatch):
+    import modulo.community
+    import modulo.extraction
+    from modulo.extraction import STARTER_VECTORS
+
+    index_entry = VectorEntry(name="assistant_axis", file="axis.pt", layer=14)
+    monkeypatch.setattr(modulo.community, "index_entries_for", lambda *a, **k: ([index_entry], []))
+    extracted = []
+
+    def fake_extract_auto(model, tok, name, vdir, registry, only_missing=False):
+        assert only_missing
+        for s in STARTER_VECTORS:
+            if not registry.get(s["name"]):
+                extracted.append(s["name"])
+                registry.add_entry(VectorEntry(name=s["name"], file=f"{s['name']}.npz", layer=14))
+        registry.save()
+
+    monkeypatch.setattr(modulo.extraction, "extract_auto", fake_extract_auto)
+    vdir = tmp_path / "vectors"
+    (vdir / "test_model").mkdir(parents=True)
+    (vdir / "test_model" / "registry.yaml").write_text("- name: sycophancy\n  file: mine.npz\n  layer: 3\n")
+
+    reg = VectorRegistry.for_model("test/model", base_dir=vdir, model=object(), tokenizer=object())
+    assert "sycophancy" not in extracted and len(extracted) == len(STARTER_VECTORS) - 1
+    assert reg.get("sycophancy").file == "mine.npz"  # your own vector is kept
+    assert reg.get("assistant_axis") is index_entry  # index vectors survive extraction
+    saved = (vdir / "test_model" / "registry.yaml").read_text()
+    assert "assistant_axis" not in saved and "formality" in saved
+
+    extracted.clear()
+    VectorRegistry.for_model("test/model", base_dir=vdir, model=object(), tokenizer=object())
+    assert extracted == []  # nothing missing on the next run
 
 
 # --- state machine ---
@@ -192,11 +281,12 @@ def test_tool_messages_include_failures_and_degeneration():
     from modulo.agent import StepResult, ToolResult
     r = StepResult(prose="", raw_output="", tool_calls=[], steering_before={}, steering_after={},
                    tool_results=[ToolResult("steer", {}, False, "on cooldown")],
-                   degenerate_output="loop loop")
+                   degenerate_output="loop loop", repeated_output="same again")
     msgs = r.tool_messages()
-    assert [m["role"] for m in msgs] == ["tool", "tool"]
+    assert [m["role"] for m in msgs] == ["tool", "tool", "tool"]
     assert "degeneration_detected" in msgs[0]["content"]
-    assert '"ok": false' in msgs[1]["content"] and "on cooldown" in msgs[1]["content"]
+    assert "repetition_detected" in msgs[1]["content"]
+    assert '"ok": false' in msgs[2]["content"] and "on cooldown" in msgs[2]["content"]
 
 
 # --- reports ---
