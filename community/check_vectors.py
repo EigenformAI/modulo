@@ -15,18 +15,9 @@ import json
 import sys
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from modulo.community import MAX_FILE_BYTES, check_vector_file, validate_index  # noqa: E402
-
-
-def load_index(path: Path) -> dict:
-    if not path.exists():
-        return {"entries": []}
-    with open(path) as f:
-        return yaml.safe_load(f) or {"entries": []}
+from modulo.community import check_vector_file, fetch_vector, load_index, validate_index  # noqa: E402
 
 
 def changed_entries(index: dict, base: dict) -> tuple[list[dict], list[str]]:
@@ -58,20 +49,6 @@ def model_dims(entry: dict) -> tuple[int | None, int | None, str | None]:
     cfg = json.loads(Path(path).read_text())
     cfg = cfg.get("text_config", cfg) if "hidden_size" not in cfg else cfg
     return cfg.get("hidden_size"), cfg.get("num_hidden_layers"), None
-
-
-def fetch_vector(entry: dict) -> tuple[Path | None, str | None]:
-    from huggingface_hub import HfApi, hf_hub_download
-    kwargs = dict(repo_id=entry["repo_id"], repo_type=entry["repo_type"], revision=entry.get("revision"))
-    try:
-        [info] = HfApi().get_paths_info(paths=[entry["filename"]], **kwargs)
-        if getattr(info, "size", None) is None:
-            return None, f"{entry['id']}: '{entry['filename']}' is not a file in {entry['repo_id']}"
-        if info.size > MAX_FILE_BYTES:
-            return None, f"{entry['id']}: file is {info.size / 1e6:.0f} MB (max {MAX_FILE_BYTES / 1e6:.0f} MB)"
-        return Path(hf_hub_download(filename=entry["filename"], **kwargs)), None
-    except Exception as e:
-        return None, f"{entry['id']}: couldn't download {entry['repo_id']}/{entry['filename']} ({type(e).__name__}: {e})"
 
 
 def check(index_path: Path, base_path: Path | None, check_all: bool) -> tuple[list[str], list[str], list[str] | None]:

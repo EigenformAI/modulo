@@ -6,10 +6,10 @@ Supports any HF model. Vectors are stored per-model in subdirectories:
     vectors/<model_slug>/sycophancy_layer14.npz
     ...
 
-If no vectors exist for a model, `VectorRegistry.for_model()` triggers auto-extraction
-to generate a starter set.
+registry.yaml holds your own vectors. `VectorRegistry.for_model()` adds the
+model's vectors from the community index (community/vectors.yaml) in memory, and
+auto-extracts a starter set if the model ends up with none.
 """
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -36,81 +36,6 @@ def _model_slug(model_name: str) -> str:
 def registry_dir_for(model_name: str, base_dir: Optional[Path] = None) -> Path:
     """The directory holding registry.yaml and vector files for a model."""
     return Path(base_dir or DEFAULT_VECTORS_DIR) / _model_slug(model_name)
-
-
-# Manifest of models with precomputed vectors available on HuggingFace.
-# Each entry: (model_name, hf_repo_id, hf_filename, repo_type)
-# When you publish vectors for a new model, add it here.
-BUNDLED_VECTORS = {
-    "Qwen/Qwen2.5-7B-Instruct": {
-        "repo_id": "Butanium/qwen-2.5-7b-instruct-assistant-axis",
-        "filename": "assistant_axis.pt",
-        "repo_type": "dataset",
-        "vector_name": "assistant_axis",
-        "layer": 14,
-        "description": "Pushes the model toward the default 'helpful assistant' persona (positive) or toward free-form role-play and character embodiment (negative).",
-        "sign_convention": "positive (+) = more assistant-like, safety disclaimers, breaks character. negative (-) = more role-playing, commits to characters.",
-        "safe_strength_min": -15.0,
-        "safe_strength_max": 15.0,
-        "format": "per_layer",
-    },
-    # Add more models here as you publish bundled vectors:
-    # "meta-llama/Llama-3.1-8B-Instruct": {...},
-    # "Qwen/Qwen2.5-14B-Instruct": {...},
-}
-
-
-def _try_download_bundled(model_name: str, slug: str, vectors_dir: Path) -> bool:
-    """Try to download precomputed vectors for a model from HuggingFace.
-
-    Returns True if vectors were downloaded and a registry.yaml was created.
-    """
-    if model_name not in BUNDLED_VECTORS:
-        return False
-
-    spec = BUNDLED_VECTORS[model_name]
-    vec_file = spec["filename"]
-    target_path = vectors_dir / vec_file
-
-    if target_path.exists():
-        # Already downloaded — just make sure registry.yaml exists
-        _write_bundled_registry(vectors_dir, spec)
-        return True
-
-    try:
-        from huggingface_hub import hf_hub_download
-        import shutil
-        print(f"[registry] Downloading bundled vectors for '{model_name}' from {spec['repo_id']}...")
-        p = hf_hub_download(
-            repo_id=spec["repo_id"],
-            filename=spec["filename"],
-            repo_type=spec["repo_type"],
-            cache_dir=os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
-        )
-        shutil.copy(p, target_path)
-        _write_bundled_registry(vectors_dir, spec)
-        print(f"[registry] Downloaded {vec_file}")
-        return True
-    except Exception as e:
-        print(f"[registry] Failed to download bundled vectors: {e}")
-        return False
-
-
-def _write_bundled_registry(vectors_dir: Path, spec: dict):
-    """Write a registry.yaml for a bundled vector."""
-    entry = {
-        "name": spec["vector_name"],
-        "file": spec["filename"],
-        "layer": spec["layer"],
-        "description": spec["description"],
-        "safe_strength_min": spec["safe_strength_min"],
-        "safe_strength_max": spec["safe_strength_max"],
-        "sign_convention": spec["sign_convention"],
-        "source": f"bundled: {spec['repo_id']}",
-        "format": spec["format"],
-    }
-    with open(vectors_dir / "registry.yaml", "w") as f:
-        yaml.safe_dump([entry], f, default_flow_style=False)
 
 
 @dataclass
@@ -151,6 +76,8 @@ class VectorRegistry:
         self.vectors_dir = vectors_dir
         self.registry_path = registry_path or (vectors_dir / "registry.yaml")
         self.entries: dict[str, VectorEntry] = {}
+        # Names that came from the community index: kept in memory, never saved
+        self._index_names: set[str] = set()
         self.load()
 
     def load(self):
@@ -195,44 +122,62 @@ class VectorRegistry:
         return "\n".join(lines)
 
     def save(self):
-        """Save the registry back to YAML."""
+        """Save your own vectors back to YAML (index vectors are left out)."""
         data = []
         for entry in self.entries.values():
-            data.append(dict(entry.__dict__))
+            if entry.name not in self._index_names:
+                data.append(dict(entry.__dict__))
         self.vectors_dir.mkdir(parents=True, exist_ok=True)
         with open(self.registry_path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False)
 
     def add_entry(self, entry: VectorEntry):
         self.entries[entry.name] = entry
+        self._index_names.discard(entry.name)
+
+    def add_index_entries(self, entries: list[VectorEntry]) -> list[str]:
+        """Add community-index vectors in memory. Your own vectors win on a name clash."""
+        notes = []
+        for entry in entries:
+            if entry.name in self.entries and entry.name not in self._index_names:
+                notes.append(f"'{entry.name}' from the community index is shadowed by your own "
+                             f"vector of that name in {self.registry_path}")
+                continue
+            self.entries[entry.name] = entry
+            self._index_names.add(entry.name)
+        return notes
 
     @classmethod
     def for_model(cls, model_name: str, base_dir: Optional[Path] = None,
-                  auto_extract: bool = True, model=None, tokenizer=None) -> "VectorRegistry":
+                  auto_extract: bool = True, model=None, tokenizer=None,
+                  include_community: bool = False, index_path: Optional[Path] = None) -> "VectorRegistry":
         """Get or create a registry for a specific model.
 
-        Tries bundled vectors first (downloaded from HuggingFace if available),
-        then falls back to auto-extraction if none exist and auto_extract=True.
-
-        Bundled vectors live in HF datasets keyed by model slug. If a model has
-        no bundled vectors, we extract a starter set using contrastive system prompts.
+        Loads your own vectors from registry.yaml, then adds the model's
+        verified vectors from the community index (plus unverified community
+        ones if include_community=True), downloading files as needed. If the
+        model still has no vectors and auto_extract=True, extracts a starter
+        set using contrastive system prompts.
         """
-        slug = _model_slug(model_name)
+        from modulo.community import index_entries_for
         vectors_dir = registry_dir_for(model_name, base_dir)
         vectors_dir.mkdir(parents=True, exist_ok=True)
         registry = cls(vectors_dir)
 
+        config = getattr(model, "config", None)
+        entries, notes = index_entries_for(
+            model_name, vectors_dir, index_path=index_path, include_community=include_community,
+            hidden_size=getattr(config, "hidden_size", None),
+            num_layers=getattr(config, "num_hidden_layers", None))
+        notes += registry.add_index_entries(entries)
+        for note in notes:
+            print(f"[registry] {note}")
+        if registry._index_names:
+            print(f"[registry] {len(registry._index_names)} vector(s) for '{model_name}' from the community index")
         if registry.entries:
-            return registry  # already have vectors for this model
+            return registry
 
-        # Try downloading bundled vectors for this model
-        if _try_download_bundled(model_name, slug, vectors_dir):
-            registry = cls(vectors_dir)  # reload after download
-            if registry.entries:
-                print(f"[registry] Loaded {len(registry.entries)} bundled vectors for '{model_name}'")
-                return registry
-
-        # No bundled vectors — auto-extract if model provided
+        # No vectors for this model — auto-extract if model provided
         if auto_extract:
             if model is None or tokenizer is None:
                 print(f"[registry] No vectors for '{model_name}' and no model provided for auto-extraction.")
@@ -240,7 +185,7 @@ class VectorRegistry:
                 print(f"[registry] Run extract_auto() with a loaded model to generate starter vectors.")
             else:
                 from modulo.extraction import extract_auto
-                print(f"[registry] No bundled vectors for '{model_name}'. Auto-extracting starter set...")
+                print(f"[registry] No vectors for '{model_name}'. Auto-extracting starter set...")
                 extract_auto(model, tokenizer, model_name, vectors_dir, registry)
                 registry = cls(vectors_dir)  # reload after extraction
 

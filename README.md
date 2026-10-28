@@ -38,7 +38,7 @@ messages += result.tool_messages()  # tool results back to the model
 
 ## How vectors are sourced
 
-**Bundle + extract**: precomputed vectors are auto-downloaded for known models (currently Qwen2.5-7B-Instruct). For unknown models, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min).
+**Community index + extract**: vectors listed in [`community/vectors.yaml`](community/vectors.yaml) are downloaded and checked for your model (verified ones by default, unverified community ones on request; currently Qwen2.5-7B-Instruct). If your model has none, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min). To contribute vectors, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Requirements
 

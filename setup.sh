@@ -14,7 +14,6 @@ cd "$SCRIPT_DIR"
 
 # Keep HF downloads on the pod's large disk (matches config.py)
 if [ -d /workspace ]; then export HF_HOME="${HF_HOME:-/workspace/hf_cache}"; fi
-VEC_DIR="vectors/Qwen_Qwen2.5-7B-Instruct"
 
 echo "=== Self-Steering Agent setup ==="
 echo "Project dir: $SCRIPT_DIR"
@@ -30,24 +29,17 @@ if ! pip install --break-system-packages --quiet -r requirements.txt; then
 fi
 
 # 2. Create directories
-mkdir -p "$VEC_DIR" logs
+mkdir -p logs
 
-# 3. Download the assistant-axis steering vector (the one confirmed-working vector)
+# 3. Fetch the default model's vectors from the community index (checked against their sha256)
 echo ""
-echo "=== Downloading assistant-axis vector ==="
-if [ -f "$VEC_DIR/assistant_axis.pt" ]; then
-    echo "  already present, skipping"
-else
-    VEC_DIR="$VEC_DIR" python3 -c "
-from huggingface_hub import hf_hub_download
-import shutil, os
-d = os.environ['VEC_DIR']
-p = hf_hub_download(repo_id='Butanium/qwen-2.5-7b-instruct-assistant-axis',
-                    filename='assistant_axis.pt', repo_type='dataset')
-shutil.copy(p, os.path.join(d, 'assistant_axis.pt'))
-print(f'  saved to {d}/assistant_axis.pt')
-" 2>&1 | { grep -v 'Fetching\|Downloading' || true; }
-fi
+echo "=== Fetching steering vectors from the community index ==="
+python3 -c "
+import config
+from modulo.registry import VectorRegistry
+r = VectorRegistry.for_model(config.MODEL_NAME, auto_extract=False)
+print('  available:', ', '.join(r.list_names()) or 'none')
+"
 
 # 4. Sanity check: load model + forward pass
 if [ "$1" != "--skip-model" ]; then
@@ -68,5 +60,5 @@ echo "  ./run.sh                    # run an interactive self-steering session"
 echo "  ./run.sh --auto --max-turns 10  # non-interactive demo (10 turns)"
 echo "  python replay.py logs/*.jsonl   # replay a session log"
 echo ""
-echo "To add more steering vectors: python extract_contrastive.py --help (or edit $VEC_DIR/registry.yaml)"
+echo "To add more steering vectors: python extract_contrastive.py --help (or see CONTRIBUTING.md)"
 echo "Discovery catalog of available vectors: modulo_catalog.yaml"

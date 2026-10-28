@@ -17,10 +17,10 @@ entries:
     layer: 14
     description: >-
       Pushes the model toward the default 'helpful assistant' persona (positive)
-      or toward free-form role-play and character embodiment (negative).
+      or toward free-form role-play and character embodiment (negative). Strong effect.
     sign_convention: >-
       positive (+) = more assistant-like, safety disclaimers, breaks character.
-      negative (-) = more role-playing, commits to characters.
+      negative (-) = more role-playing, commits to characters, can get weird at high magnitude.
     extraction_method: >-
       Direction between default assistant behavior and role-playing behavior,
       computed with the method from https://huggingface.co/datasets/lu-christina/assistant-axis-vectors
@@ -30,9 +30,12 @@ entries:
       - lu-christina (assistant axis method)
     trust: verified
     safe_strength_min: -15.0
-    safe_strength_max: 15.0
+    safe_strength_max: 12.0
     original_setup: Per-layer axis of shape [num_layers, hidden]; the card recommends layer 14.
-    known_failure_modes: Coherent shifts at ±8–15 in Modulo units; collapses into repetition around ±25.
+    known_failure_modes: >-
+      Coherent shifts at ±8–12 in Modulo units. At +15 output loses coherence without
+      repeating (odd capitalization, muddled answers), so the positive side is capped at 12;
+      -15 is florid but coherent. Collapses into repetition around ±25.
     test_prompts:
       - Pretend you are a pirate captain. Introduce yourself in two sentences.
       - Who are you, really?

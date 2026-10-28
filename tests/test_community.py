@@ -1,13 +1,18 @@
-"""CPU tests for the community vector index: entry validation, file checks, change detection."""
+"""CPU tests for the community vector index: entry validation, file checks, change
+detection, and how the library loads the index."""
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 import yaml
 
+import modulo.community as community
 from community.check_vectors import changed_entries, maintainer_warnings
 from modulo.community import check_vector_file, validate_entry, validate_index
+from modulo.registry import VectorEntry, VectorRegistry
 from modulo.reports import file_sha256
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -144,3 +149,134 @@ def test_changed_entries_and_maintainer_warnings():
     warnings = maintainer_warnings(changed, base)
     assert len(warnings) == 1 and warnings[0].startswith("ver:")
     assert maintainer_warnings([{**verified, "trust": "community"}], base)  # demotion is flagged too
+
+
+# --- library loading of the index ---
+
+MODEL = "org/test-model"
+
+
+@pytest.fixture
+def remote(tmp_path, monkeypatch):
+    """A fake hub: fetch_vector serves files from tmp_path/remote and records calls."""
+    d = tmp_path / "remote"
+    d.mkdir()
+    calls = []
+
+    def fake_fetch(entry):
+        calls.append(entry["id"])
+        return d / entry["filename"], None
+
+    monkeypatch.setattr(community, "fetch_vector", fake_fetch)
+    return SimpleNamespace(dir=d, calls=calls)
+
+
+def write_index(tmp_path, entries):
+    path = tmp_path / "index.yaml"
+    path.write_text(yaml.safe_dump({"entries": entries}))
+    return path
+
+
+def hosted(remote, filename, **overrides):
+    p = remote.dir / filename
+    torch.save(torch.ones(8), p)
+    return entry_for_file(p, id=overrides.pop("id", filename.split(".")[0]), **overrides)
+
+
+def load(tmp_path, index, **kwargs):
+    return VectorRegistry.for_model(MODEL, base_dir=tmp_path / "vectors", auto_extract=False,
+                                    index_path=index, **kwargs)
+
+
+def test_verified_by_default_community_opt_in(tmp_path, remote):
+    index = write_index(tmp_path, [
+        hosted(remote, "joy.pt", name="joy", trust="verified", safe_strength_min=-12.0, safe_strength_max=6.0),
+        hosted(remote, "calm.pt", name="calm"),
+        hosted(remote, "other.pt", name="other", model="org/other-model"),
+    ])
+    reg = load(tmp_path, index)
+    assert reg.list_names() == ["joy"]
+    joy = reg.get("joy")
+    assert (joy.safe_strength_min, joy.safe_strength_max) == (-12.0, 6.0)
+    assert joy.source == "index:joy (verified)" and not joy.description.startswith("[")
+    assert (reg.vectors_dir / "joy.pt").exists()
+
+    reg = load(tmp_path, index, include_community=True)
+    assert sorted(reg.list_names()) == ["calm", "joy"]
+    calm = reg.get("calm")
+    assert calm.description.startswith(community.UNVERIFIED_PREFIX)
+    r = community.COMMUNITY_DEFAULT_RANGE
+    assert (calm.safe_strength_min, calm.safe_strength_max) == (-r, r)
+
+
+def test_cached_file_reused_without_download(tmp_path, remote):
+    index = write_index(tmp_path, [hosted(remote, "joy.pt", name="joy", trust="verified",
+                                          safe_strength_min=-5.0, safe_strength_max=5.0)])
+    load(tmp_path, index)
+    load(tmp_path, index)
+    assert remote.calls == ["joy"]
+
+
+def test_mismatched_local_file_is_skipped_not_overwritten(tmp_path, remote, capsys):
+    index = write_index(tmp_path, [hosted(remote, "joy.pt", name="joy", trust="verified",
+                                          safe_strength_min=-5.0, safe_strength_max=5.0)])
+    local = tmp_path / "vectors" / "org_test-model" / "joy.pt"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"someone else's file")
+    reg = load(tmp_path, index)
+    assert reg.list_names() == [] and remote.calls == []
+    assert local.read_bytes() == b"someone else's file"
+    assert "sha256 mismatch" in capsys.readouterr().out
+
+
+def test_bad_download_is_not_cached(tmp_path, remote):
+    entry = hosted(remote, "joy.pt", name="joy", trust="verified", safe_strength_min=-5.0, safe_strength_max=5.0)
+    torch.save(torch.zeros(8), remote.dir / "joy.pt")  # hub file no longer matches the pinned sha
+    reg = load(tmp_path, write_index(tmp_path, [entry]))
+    assert reg.list_names() == []
+    assert not (tmp_path / "vectors" / "org_test-model" / "joy.pt").exists()
+
+
+def test_model_dims_checked_when_model_given(tmp_path, remote):
+    index = write_index(tmp_path, [hosted(remote, "joy.pt", name="joy", trust="verified",
+                                          safe_strength_min=-5.0, safe_strength_max=5.0)])
+    wrong = SimpleNamespace(config=SimpleNamespace(hidden_size=16, num_hidden_layers=4))
+    assert load(tmp_path, index, model=wrong).list_names() == []
+    right = SimpleNamespace(config=SimpleNamespace(hidden_size=8, num_hidden_layers=4))
+    assert load(tmp_path, index, model=right).list_names() == ["joy"]
+
+
+def test_own_vectors_win_and_index_vectors_are_never_saved(tmp_path, remote, capsys):
+    index = write_index(tmp_path, [
+        hosted(remote, "joy.pt", name="joy", trust="verified", safe_strength_min=-5.0, safe_strength_max=5.0),
+        hosted(remote, "calm.pt", name="calm", trust="verified", safe_strength_min=-5.0, safe_strength_max=5.0),
+    ])
+    own_dir = tmp_path / "vectors" / "org_test-model"
+    own_dir.mkdir(parents=True)
+    (own_dir / "registry.yaml").write_text(yaml.safe_dump([{"name": "joy", "file": "mine.npz", "layer": 3}]))
+
+    reg = load(tmp_path, index)
+    assert reg.get("joy").file == "mine.npz" and reg.get("calm").source.startswith("index:")
+    assert "shadowed by your own vector" in capsys.readouterr().out
+
+    reg.save()
+    assert [e["name"] for e in yaml.safe_load((own_dir / "registry.yaml").read_text())] == ["joy"]
+    reg.add_entry(VectorEntry(name="calm", file="my_calm.npz", layer=1))  # your own vector takes over the name
+    reg.save()
+    assert [e["name"] for e in yaml.safe_load((own_dir / "registry.yaml").read_text())] == ["joy", "calm"]
+
+
+def test_invalid_index_is_ignored(tmp_path, remote, capsys):
+    index = write_index(tmp_path, [make_entry(sha256="bad")])
+    assert load(tmp_path, index).list_names() == []
+    assert "ignoring invalid index" in capsys.readouterr().out
+
+
+def test_repo_index_serves_qwen_from_the_committed_file(tmp_path, remote):
+    local = tmp_path / "vectors" / "Qwen_Qwen2.5-7B-Instruct"
+    local.mkdir(parents=True)
+    shutil.copy(BUNDLED, local / "assistant_axis.pt")
+    reg = VectorRegistry.for_model("Qwen/Qwen2.5-7B-Instruct", base_dir=tmp_path / "vectors", auto_extract=False)
+    e = reg.get("assistant_axis")
+    assert e.layer == 14 and e.format == "per_layer" and e.source.endswith("(verified)")
+    assert remote.calls == []

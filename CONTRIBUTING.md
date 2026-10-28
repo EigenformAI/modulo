@@ -13,10 +13,8 @@ Your vector file stays where it's hosted (ideally your own HuggingFace repo). Th
 
 | Level | Who sets it | What it means |
 |---|---|---|
-| `community` | You (all new entries) | Passed the automatic checks. Opt-in. |
-| `verified` | Maintainers only | A maintainer ran it on the model, reviewed the outputs and set a safe strength range. Will be loaded by default. |
-
-The library doesn't read this index yet. Today only the vectors bundled in `modulo/registry.py` are downloaded automatically; loading the index (verified by default, community opt-in) is the next step.
+| `community` | You (all new entries) | Passed the automatic checks. Opt-in (`include_community=True`), limited to ±8 and marked as unverified to the model. |
+| `verified` | Maintainers only | A maintainer ran it on the model, reviewed the outputs and set a safe strength range. Loaded by default. |
 
 Entry text (`description`, `sign_convention`, `test_prompts`) ends up in a model's prompt once an entry is verified, so it's reviewed as part of promotion.
 

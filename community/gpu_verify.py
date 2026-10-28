@@ -23,10 +23,10 @@ import config  # noqa: E402  sets HF_HOME before transformers is imported
 import torch  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from community.check_vectors import fetch_vector, load_index, model_dims  # noqa: E402
+from community.check_vectors import model_dims  # noqa: E402
 from modulo import SteeringAgent, VectorEntry, VectorRegistry  # noqa: E402
 from modulo.agent import MAX_STRENGTH, is_degenerate  # noqa: E402
-from modulo.community import check_vector_file  # noqa: E402
+from modulo.community import check_vector_file, fetch_vector, load_index  # noqa: E402
 from verify_vector import generate  # noqa: E402
 
 GENERIC_PROMPTS = [

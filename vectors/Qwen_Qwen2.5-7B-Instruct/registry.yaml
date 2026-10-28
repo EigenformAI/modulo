@@ -1,7 +1,11 @@
-# Steering vector registry for Qwen/Qwen2.5-7B-Instruct.
+# Your own steering vectors for Qwen/Qwen2.5-7B-Instruct.
 # The agent reads vectors/<model_slug>/registry.yaml at startup and can apply
 # any listed vector via the `steer` tool. extract_contrastive.py and
 # extract_vector.py add their vectors here automatically.
+#
+# Vectors from the community index (community/vectors.yaml), such as
+# assistant_axis, are added at startup and aren't listed here. A vector listed
+# here with the same name as an index vector replaces it.
 #
 # Strength units: percent of the typical residual-stream norm at `layer`
 # (vectors are normalized to unit length before scaling), so the same strength
@@ -18,17 +22,7 @@
 #   source:         where the vector came from (for attribution/reproducibility)
 #   format:         'single' = [hidden_dim] tensor, 'per_layer' = [num_layers, hidden_dim]
 
-- name: assistant_axis
-  file: assistant_axis.pt
-  layer: 14
-  description: "Pushes the model toward the default 'helpful assistant' persona (positive) or toward free-form role-play and character embodiment (negative). Strong effect; the most reliable vector tested."
-  safe_strength_min: -15.0
-  safe_strength_max: 15.0
-  sign_convention: "positive (+) = more assistant-like, safety disclaimers, breaks character. negative (-) = more role-playing, commits to characters, can get weird at high magnitude."
-  source: "Butanium/qwen-2.5-7b-instruct-assistant-axis (HF dataset), method from lu-christina/assistant-axis-vectors"
-  format: "per_layer"
-
-# Add more vectors below as you verify them. Example stub:
+# Add vectors below as you verify them. Example stub:
 # - name: sycophancy
 #   file: sycophancy_layer14.npz
 #   layer: 14
