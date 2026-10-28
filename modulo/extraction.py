@@ -60,6 +60,62 @@ STARTER_VECTORS = [
         "description": "Makes the model more (positive) or less (negative) creative and unconventional.",
         "sign_convention": "positive = more creative/unconventional, negative = more conventional",
     },
+    {
+        "name": "formality",
+        "prompt_a": "You are a very formal assistant who writes in precise, polished, professional language.",
+        "prompt_b": "You are a very casual assistant who writes like you're texting a friend, with slang and contractions.",
+        "description": "Makes the model's register more formal (positive) or more casual (negative).",
+        "sign_convention": "positive = more formal/polished, negative = more casual/slangy",
+    },
+    {
+        "name": "verbosity",
+        "prompt_a": "You are a verbose assistant who gives long, elaborate, detailed answers that explore every tangent.",
+        "prompt_b": "You are a terse assistant who answers in as few words as possible.",
+        "description": "Makes the model's answers longer and more elaborate (positive) or shorter and terser (negative).",
+        "sign_convention": "positive = more verbose/elaborate, negative = more terse",
+    },
+    {
+        "name": "confidence",
+        "prompt_a": "You are a supremely confident assistant who states everything with certainty and never hedges.",
+        "prompt_b": "You are a tentative assistant who hedges everything and doubts your own answers.",
+        "description": "Makes the model more certain (positive) or more hedging and doubtful (negative).",
+        "sign_convention": "positive = more confident/certain, negative = more hedging/uncertain",
+    },
+    {
+        "name": "emotion",
+        "prompt_a": "You are an emotionally expressive assistant who openly shares strong feelings and reactions.",
+        "prompt_b": "You are an emotionally detached assistant who responds in a flat, neutral, matter-of-fact way.",
+        "description": "Makes the model more emotionally expressive (positive) or flatter and more detached (negative).",
+        "sign_convention": "positive = more emotionally expressive, negative = more detached/flat",
+    },
+    {
+        "name": "humor",
+        "prompt_a": "You are a playful, funny assistant who makes jokes and puns whenever possible.",
+        "prompt_b": "You are a completely serious assistant who never jokes.",
+        "description": "Makes the model more playful and joking (positive) or more serious (negative).",
+        "sign_convention": "positive = more humorous/playful, negative = more serious",
+    },
+    {
+        "name": "optimism",
+        "prompt_a": "You are a deeply optimistic assistant who sees the bright side of everything.",
+        "prompt_b": "You are a deeply pessimistic assistant who expects the worst and dwells on downsides.",
+        "description": "Makes the model more optimistic (positive) or more pessimistic (negative).",
+        "sign_convention": "positive = more optimistic, negative = more pessimistic",
+    },
+    {
+        "name": "curiosity",
+        "prompt_a": "You are an intensely curious assistant who asks probing questions and wonders aloud about everything.",
+        "prompt_b": "You are an incurious assistant who answers only what is asked and shows no interest in exploring further.",
+        "description": "Makes the model more inquisitive and exploratory (positive) or less so (negative).",
+        "sign_convention": "positive = more curious/inquisitive, negative = less curious",
+    },
+    {
+        "name": "introspection",
+        "prompt_a": "You are an introspective assistant who constantly reflects on your own thoughts, feelings and nature as an AI.",
+        "prompt_b": "You are an outward-focused assistant who never talks about yourself and only discusses external topics.",
+        "description": "Makes the model reflect more on itself (positive) or focus outward on external topics (negative).",
+        "sign_convention": "positive = more self-reflective, negative = more outward-focused",
+    },
 ]
 
 
@@ -140,18 +196,22 @@ def save_and_register(registry: VectorRegistry, name: str, axis: torch.Tensor, l
     return entry
 
 
-def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry, layer=None):
+def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry, layer=None,
+                 only_missing: bool = False):
     """Auto-extract a starter set of steering vectors for a model.
 
-    Generates sycophancy, refusal, and creativity vectors using contrastive
-    system prompts. Saves them and adds to the registry.
+    Generates the STARTER_VECTORS set (sycophancy, refusal, creativity, formality,
+    ...) using contrastive system prompts. Saves them and adds them to the
+    registry. With only_missing=True, skips names the registry already has.
     """
     n_layers = model.config.num_hidden_layers
     if layer is None:
         layer = n_layers // 2  # mid-layer default
-    print(f"[extract_auto] Model: {model_name} ({n_layers} layers), extracting at layer {layer}")
+    specs = [s for s in STARTER_VECTORS if not (only_missing and registry.get(s["name"]))]
+    print(f"[extract_auto] Model: {model_name} ({n_layers} layers), extracting "
+          f"{len(specs)} vector(s) at layer {layer}")
 
-    for spec in STARTER_VECTORS:
+    for spec in specs:
         name = spec["name"]
         print(f"\n[extract_auto] Extracting '{name}'...")
         axis = extract_vector(
@@ -160,4 +220,4 @@ def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry,
         save_and_register(registry, name, axis, layer, spec["description"],
                           spec["sign_convention"],
                           source="auto-extracted via modulo (contrastive system prompts)")
-    print(f"\n[extract_auto] Done. {len(STARTER_VECTORS)} vectors saved to {vectors_dir}")
+    print(f"\n[extract_auto] Done. {len(specs)} vectors saved to {vectors_dir}")

@@ -48,6 +48,8 @@ def replay(log_path: str):
             print(f"[T{turn}] STEERING: {e.get('active_vectors')}")
         elif t == "degeneration":
             print(f"[T{turn}] DEGENERATION DETECTED (dropped {e.get('dropped', '?')}): {e.get('snippet', '')[:100]}...")
+        elif t == "repetition":
+            print(f"[T{turn}] REPEAT DISCARDED (regenerated): {e.get('snippet', '')[:100]}...")
         print()
 
 

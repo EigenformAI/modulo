@@ -34,6 +34,8 @@ Chat templates must accept `system` and `tool` roles (Qwen, Llama-3.x, recent Mi
 ./run.sh --auto --max-turns 8 --seed "Try steering yourself"
 ```
 
+In `--auto` mode, a turn with no tool calls is followed by a neutral `tool`-role status message (turn count, that no one is replying, current steering) so the model keeps the next turn without being prompted to steer. `--nudge legacy` uses the old user message suggesting `steer` instead. The demo offers unverified community-index vectors too (`include_community=True`); turn logs include each turn's `raw_output`.
+
 ## Requirements
 
 - **GPU**: 24GB+ VRAM for 7B models, 8GB+ for 3B. Model loads in bf16.
@@ -56,7 +58,7 @@ At startup the agent combines three sources for its model:
 
 1. **Your own vectors**: `vectors/<model_slug>/registry.yaml`, where extraction scripts register what you make. These win over an index vector of the same name.
 2. **The community index**: `community/vectors.yaml` in the repo (update the repo to get new entries; override with `MODULO_INDEX_PATH`). `verified` entries are loaded by default; unverified `community` entries only with `SteeringAgent(..., include_community=True)`, with a ±8 range unless a maintainer set one, and marked as unverified in the model's prompt. Files are downloaded from HuggingFace at their pinned revision, checked against their sha256 (and the model's dimensions), and cached in `vectors/<model_slug>/`. A cached file that doesn't match is reported and never overwritten. Index entries are kept in memory and never written to `registry.yaml`. Currently: Qwen2.5-7B-Instruct (assistant_axis).
-3. **Auto-extract**: if the model ends up with no vectors, the library auto-extracts a starter set (sycophancy, refusal, creativity) using contrastive system prompts. This takes ~2 min on first run but works for any HF model.
+3. **Auto-extract**: the library extracts any starter vector the model doesn't have yet (sycophancy, refusal, creativity, formality, verbosity, confidence, emotion, humor, optimism, curiosity, introspection; `STARTER_VECTORS` in `modulo/extraction.py`) using contrastive system prompts, and registers them in `registry.yaml`. This takes several minutes on first run but works for any HF model. A vector of your own with a starter name is kept and not re-extracted.
 
 Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `MODULO_VECTORS_DIR`.
 
@@ -86,7 +88,7 @@ agent = SteeringAgent(model, tokenizer)
 # Explicit model name
 agent = SteeringAgent(model, tokenizer, model_name="Qwen/Qwen2.5-3B-Instruct")
 
-# Disable auto-extraction (use only your own and index vectors)
+# Disable auto-extraction of starter vectors (use only your own and index vectors)
 agent = SteeringAgent(model, tokenizer, auto_extract=False)
 
 # Also offer unverified community-index vectors
@@ -114,8 +116,9 @@ vec = extract_vector(model, tokenizer,
 - `tool_calls` — list of `ToolCall(name, arguments, raw)`
 - `tool_results` — list of `ToolResult(name, arguments, ok, message)`
 - `degenerate_output` — the discarded steered output, if the degeneration detector fired
+- `repeated_output` — the discarded output, if it nearly repeated one of the last 3 assistant turns
 - `steering_before` / `steering_after` — `{name: strength}` dicts
-- `tool_messages()` — tool results (and any degeneration notice) as `role: "tool"` messages
+- `tool_messages()` — tool results (and any degeneration or repetition notice) as `role: "tool"` messages
 
 ## The tools the model has
 
@@ -141,6 +144,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 - Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `modulo/agent.py`), plus per-vector ranges
 - Cooldown: after an explicit or automatic drop, a vector can't be re-applied for the next 2 turns (natural expiry has no cooldown)
 - Degeneration detector: if steered output is repetitive, all vectors are dropped, the turn is regenerated unsteered, and the model is told. It catches repetition loops, not non-repetitive word salad.
+- Repeat detector: if a turn's prose is ≥80% similar (word-level) to one of the last 3 assistant turns, it is discarded and regenerated once (steering kept), and the model is told. This stops the model re-sending the same answer turn after turn; loose paraphrase loops get through until they settle into near-copies.
 - Kill switch: Ctrl-C stops after the current turn; a second Ctrl-C (or Ctrl-C at the input prompt) stops immediately
 
 ## Key files
@@ -173,7 +177,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 
 ```bash
 pytest                              # everything; GPU tests skip without CUDA
-pytest tests/test_agent_logic.py    # CPU only: parsing, decay/cooldown, degeneration, tool validation
+pytest tests/test_agent_logic.py    # CPU only: parsing, decay/cooldown, degeneration, repeats, tool validation
 pytest tests/test_steering_gpu.py   # loads the model; checks steering really changes generation
 ```
 
@@ -182,7 +186,7 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 ## Troubleshooting
 
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
-- **First run is slow for new models**: Auto-extraction generates 3 vectors (~2 min). Subsequent runs load from disk.
+- **First run is slow**: Auto-extraction generates the starter vectors the model is missing (11 at most, several minutes). Subsequent runs load from disk. Check new ones with `verify_vector.py` before trusting their ±10 default range.
 - **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
 - **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range (in `registry.yaml` for your own vectors, in `community/vectors.yaml` for index vectors) or lower `MAX_STRENGTH`.
 - **An index vector doesn't load**: Check the `[registry]` lines printed at startup. A sha256 mismatch on a cached file means the file in `vectors/<model_slug>/` isn't the one the index pins; delete it to re-download. Unverified entries also need `include_community=True`.

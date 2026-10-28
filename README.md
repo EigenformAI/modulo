@@ -38,7 +38,7 @@ messages += result.tool_messages()  # tool results back to the model
 
 ## How vectors are sourced
 
-**Community index + extract**: vectors listed in [`community/vectors.yaml`](community/vectors.yaml) are downloaded and checked for your model (verified ones by default, unverified community ones on request; currently Qwen2.5-7B-Instruct). If your model has none, a starter set (sycophancy, refusal, creativity) is auto-extracted on first run using contrastive system prompts (~2 min). To contribute vectors, see [CONTRIBUTING.md](CONTRIBUTING.md).
+**Community index + extract**: vectors listed in [`community/vectors.yaml`](community/vectors.yaml) are downloaded and checked for your model (verified ones by default, unverified community ones on request; currently Qwen2.5-7B-Instruct). Any starter vectors your model is missing (sycophancy, refusal, creativity, formality, verbosity, confidence, emotion, humor, optimism, curiosity, introspection) are auto-extracted on first run using contrastive system prompts (several minutes). To contribute vectors, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Requirements
 
@@ -46,7 +46,7 @@ GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. Se
 
 ## Safety rails
 
-Per-turn decay (0.85×), max 4 active vectors, strength clamping (strength = % of residual-stream norm, max 15), cooldown on dropped vectors, degeneration detector, kill switch.
+Per-turn decay (0.85×), max 4 active vectors, strength clamping (strength = % of residual-stream norm, max 15), cooldown on dropped vectors, degeneration detector, cross-turn repeat detector, kill switch.
 
 ## License
 

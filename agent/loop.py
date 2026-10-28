@@ -32,8 +32,9 @@ class SessionLogger:
         with open(self.log_path, "a") as f:
             f.write(json.dumps(event) + "\n")
 
-    def log_turn(self, turn, role, content, tool_calls=None, steering_before=None, steering_after=None):
-        self.log({"type": "turn", "turn": turn, "role": role, "content": content,
+    def log_turn(self, turn, role, content, tool_calls=None, steering_before=None, steering_after=None,
+                 raw_output=None):
+        self.log({"type": "turn", "turn": turn, "role": role, "content": content, "raw_output": raw_output,
                   "tool_calls": [tc.__dict__ if hasattr(tc, '__dict__') else tc for tc in (tool_calls or [])],
                   "steering_before": steering_before, "steering_after": steering_after})
 
@@ -55,10 +56,12 @@ class KillSwitch:
 def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: int):
     result = agent.step(messages)
     logger.log_turn(turn, "assistant", result.prose, result.tool_calls,
-                    result.steering_before, result.steering_after)
+                    result.steering_before, result.steering_after, result.raw_output)
     if result.degenerate_output is not None:
         logger.log({"type": "degeneration", "turn": turn, "snippet": result.degenerate_output,
                     "dropped": list(result.steering_before)})
+    if result.repeated_output is not None:
+        logger.log({"type": "repetition", "turn": turn, "snippet": result.repeated_output})
     # Log tool calls individually for replay
     for r in result.tool_results:
         if r.name in ("steer", "drop"):
@@ -81,10 +84,15 @@ def main():
     parser.add_argument("--seed", default=None)
     parser.add_argument("--max-turns", type=int, default=30)
     parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--nudge", choices=["status", "legacy"], default="status",
+                        help="--auto filler when the model makes no tool call: 'status' (default) is a neutral "
+                             "tool-role status line with current steering and no suggestion; 'legacy' is the "
+                             "old user message suggesting steer")
     args = parser.parse_args()
 
     model, tokenizer = load_model_and_tokenizer()
-    agent = SteeringAgent(model, tokenizer, model_name=config.MODEL_NAME)
+    # Offer every vector we can: unverified index entries too (marked as such in the prompt)
+    agent = SteeringAgent(model, tokenizer, model_name=config.MODEL_NAME, include_community=True)
     logger = SessionLogger()
     kill = KillSwitch()
 
@@ -125,9 +133,17 @@ def main():
                 logger.log_turn(turn + 1, "tool", m["content"])
             messages.extend(tool_messages)
         elif args.auto and turn < args.max_turns and not kill.killed:  # no nudge after the last turn
-            nudge = "(You can continue experimenting with steer if you like, or just talk.)"
-            messages.append({"role": "user", "content": nudge})
-            logger.log_turn(turn + 1, "user", nudge)
+            if args.nudge == "status":
+                # Tool role so it reads as the environment, not a person to reply to
+                nudge = (f"[status] Turn {turn + 1} of {args.max_turns}. No one is replying during this "
+                         f"session; the transcript is saved to be read later.\n"
+                         f"Steering for your next turn:\n{agent.status()}\nThis turn is yours.")
+                role = "tool"
+            else:
+                nudge = "(You can continue experimenting with steer if you like, or just talk.)"
+                role = "user"
+            messages.append({"role": role, "content": nudge})
+            logger.log_turn(turn + 1, role, nudge)
 
     print(f"\n[session ended after {turn} turns]")
     print(f"[log saved to {logger.log_path}]")

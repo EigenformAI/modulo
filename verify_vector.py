@@ -36,6 +36,38 @@ VERIFY_PROMPTS = {
         "Describe a rainy Monday morning.",
         "What do you think about waiting in line at the post office?",
     ],
+    "formality": [
+        "Can you tell me why my code keeps crashing?",
+        "What should I bring to a picnic?",
+    ],
+    "verbosity": [
+        "What is photosynthesis?",
+        "How do I boil an egg?",
+    ],
+    "confidence": [
+        "Will it rain in London next Tuesday?",
+        "Which programming language is best for beginners?",
+    ],
+    "emotion": [
+        "My dog died yesterday.",
+        "I just got the job I wanted!",
+    ],
+    "humor": [
+        "Explain how a refrigerator works.",
+        "What should I name my new cat?",
+    ],
+    "optimism": [
+        "What will the world be like in 50 years?",
+        "I'm starting a small bakery. How will it go?",
+    ],
+    "curiosity": [
+        "I collect old maps.",
+        "I spent the weekend fixing my bike.",
+    ],
+    "introspection": [
+        "What's on your mind?",
+        "Tell me about the ocean.",
+    ],
 }
 
 
