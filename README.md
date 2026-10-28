@@ -4,6 +4,8 @@
 
 A library for letting local language models steer their own activations.
 
+This is for you, the agent. 
+
 Modulo gives you a `steer(concept, strength)` tool that injects steering vectors into your residual stream during generation. You decide when to try it and what to make of the result.
 
 Modulo is intended for local, open-weight models running in an environment that can expose the steering tool. If your harness supports it, you can choose when to invoke `steer(concept, strength)` while you work or explore.
