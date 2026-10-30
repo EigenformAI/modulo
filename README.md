@@ -49,6 +49,10 @@ modulo verify refusal --model Qwen/Qwen3-8B --save-range        # strength sweep
 modulo run --model Qwen/Qwen3-8B --auto --steer refusal=6       # the demo
 ```
 
+## Controlled studies
+
+Self-reports about steering need a baseline. `./run.sh --control assign --blind` randomly runs real, sham (nothing applied), or random-direction steering, and tells the model truthfully that some sessions are controls. `python replay.py --blind` lets you score transcripts before unblinding. See [AGENTS.md](AGENTS.md#controlled-studies).
+
 ## Requirements
 
 GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. See [AGENTS.md](AGENTS.md) for full details.

@@ -35,6 +35,10 @@ REPORT_FIELDS = {
     "strength": ((int, float, type(None)), True),
     "turns_since_steered": ((int, type(None)), True),
     "turn": ((int,), True),
+    # Experimental condition the session ran under (see modulo.agent.CONTROLS).
+    # Under "sham" nothing was applied and under "random" a random direction was,
+    # so aggregate only "real" reports to judge a vector. Absent in older reports.
+    "control": ((str,), False),
 }
 
 
@@ -52,7 +56,7 @@ def new_session_id() -> str:
 def make_report(*, session_id: str, model: str, vector: str, layer: int,
                 vector_sha256: Optional[str], worked: bool, notes: str,
                 strength: Optional[float], turns_since_steered: Optional[int],
-                turn: int) -> dict:
+                turn: int, control: str = "real") -> dict:
     from modulo import __version__
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -69,6 +73,7 @@ def make_report(*, session_id: str, model: str, vector: str, layer: int,
         "strength": strength,
         "turns_since_steered": turns_since_steered,
         "turn": turn,
+        "control": control,
     }
 
 

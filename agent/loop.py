@@ -11,15 +11,32 @@ Usage:
     python -m agent.loop --max-turns 20   # cap turns
     python -m agent.loop --auto           # auto-continue (non-interactive)
     python -m agent.loop --steer honesty=6 --model Qwen/Qwen2.5-3B-Instruct
+
+Controls (see modulo.agent.CONTROLS):
+    python -m agent.loop --control sham              # steer() reports success, nothing is applied
+    python -m agent.loop --control random            # random direction of the same magnitude
+    python -m agent.loop --control assign --blind    # pick a condition at random, hide it until the end
+
+Passing --control at all marks the session as part of a controlled study: the
+system prompt then tells the model that some sessions are controls (without
+saying which), identically in every condition, so the prompt stays truthful and
+doesn't reveal the condition. Always pass --control (including --control real)
+for every session in a study. The condition itself is never shown to the model;
+it is always in the log's session header, so blinded sessions can be scored
+first and unblinded afterwards (python replay.py --blind).
 """
 import argparse
 import json
+import random
 import signal
+import subprocess
+import sys
 from datetime import datetime
-from pathlib import Path
 
 import config  # sets HF_HOME before transformers is imported
-from modulo import SteeringAgent
+import modulo.agent as ma
+from modulo import SteeringAgent, __version__
+from modulo.reports import file_sha256
 from load_model import load_model_and_tokenizer
 
 
@@ -34,10 +51,51 @@ class SessionLogger:
             f.write(json.dumps(event) + "\n")
 
     def log_turn(self, turn, role, content, tool_calls=None, steering_before=None, steering_after=None,
-                 raw_output=None):
+                 raw_output=None, **extra):
         self.log({"type": "turn", "turn": turn, "role": role, "content": content, "raw_output": raw_output,
                   "tool_calls": [tc.__dict__ if hasattr(tc, '__dict__') else tc for tc in (tool_calls or [])],
-                  "steering_before": steering_before, "steering_after": steering_after})
+                  "steering_before": steering_before, "steering_after": steering_after, **extra})
+
+
+def _git(*cmd):
+    try:
+        return subprocess.run(["git", *cmd], cwd=config.PROJECT_ROOT, capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except Exception:
+        return None
+
+
+def session_metadata(agent: SteeringAgent, args, rng_seed: int, gen_params: dict) -> dict:
+    """Everything needed to audit or re-run a session."""
+    import torch
+    import transformers
+    vectors = {}
+    for name, e in agent.registry.entries.items():
+        vectors[name] = {**e.__dict__, "sha256": file_sha256(agent.registry.vectors_dir / e.file)}
+    return {
+        "type": "session",
+        "argv": sys.argv[1:],
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "modulo_version": __version__,
+        "model": agent.model_name,
+        "dtype": config.DTYPE,
+        "torch": torch.__version__,
+        "transformers": transformers.__version__,
+        "control": agent.control,
+        "control_seed": agent.control_seed,
+        "controlled_study": agent.disclose_controls,
+        "blind": args.blind,
+        "rng_seed": rng_seed,
+        "generation": gen_params,
+        "nll_threshold": agent.nll_threshold,
+        "steer_at_start": args.steer,
+        "rails": {"decay": ma.DECAY_FACTOR, "floor": ma.STRENGTH_FLOOR, "max_active": ma.MAX_ACTIVE_VECTORS,
+                  "max_strength": ma.MAX_STRENGTH, "cooldown_turns": ma.COOLDOWN_TURNS,
+                  "repeat_similarity": ma.REPEAT_SIMILARITY, "repeat_lookback": ma.REPEAT_LOOKBACK},
+        "registry_path": str(agent.registry.registry_path),
+        "vectors": vectors,
+    }
 
 
 class KillSwitch:
@@ -54,12 +112,14 @@ class KillSwitch:
         print("\n[kill switch] SIGINT received — will stop after this turn. Ctrl-C again to stop now.")
 
 
-def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: int):
-    result = agent.step(messages)
+def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: int, gen_params: dict):
+    result = agent.step(messages, **gen_params)
     logger.log_turn(turn, "assistant", result.prose, result.tool_calls,
-                    result.steering_before, result.steering_after, result.raw_output)
+                    result.steering_before, result.steering_after, result.raw_output,
+                    system_prompt=result.system_prompt, unsteered_nll=result.unsteered_nll)
     if result.degenerate_output is not None:
         logger.log({"type": "degeneration", "turn": turn, "snippet": result.degenerate_output,
+                    "reason": result.degenerate_reason, "unsteered_nll": result.unsteered_nll,
                     "dropped": list(result.steering_before)})
     if result.repeated_output is not None:
         logger.log({"type": "repetition", "turn": turn, "snippet": result.repeated_output})
@@ -82,7 +142,7 @@ def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", default=None)
+    parser.add_argument("--seed", default=None, help="Seed user message (the first prompt)")
     parser.add_argument("--max-turns", type=int, default=30)
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--nudge", choices=["status", "legacy"], default="status",
@@ -93,6 +153,18 @@ def main():
     parser.add_argument("--steer", action="append", default=[], metavar="NAME=STRENGTH",
                         help="apply a vector before the first turn, as if the model had called steer "
                              "(one full-strength turn, then decay). Repeatable.")
+    parser.add_argument("--control", default=None, choices=[*ma.CONTROLS, "assign"],
+                        help="Experimental condition ('assign' picks one at random). Giving this "
+                             "marks a controlled study; omit it for a plain demo (real steering)")
+    parser.add_argument("--blind", action="store_true",
+                        help="Don't print the condition until the session ends")
+    parser.add_argument("--rng-seed", type=int, default=None, help="Sampling seed (default: random, logged)")
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--max-new-tokens", type=int, default=300)
+    parser.add_argument("--nll-threshold", type=float, default=None,
+                        help="Treat steered outputs above this unsteered NLL as degenerate (off by default; "
+                             "NLL doesn't separate word salad from heavy role-play, see AGENTS.md)")
     args = parser.parse_args()
     steers = []
     for spec in args.steer:
@@ -104,15 +176,26 @@ def main():
         if not name.strip():
             parser.error(f"--steer expects NAME=STRENGTH, got {spec!r}")
 
+    rng_seed = args.rng_seed if args.rng_seed is not None else random.SystemRandom().randrange(2**31)
+    study = args.control is not None
+    control = random.SystemRandom().choice(ma.CONTROLS) if args.control == "assign" else (args.control or "real")
+    gen_params = {"max_new_tokens": args.max_new_tokens, "temperature": args.temperature, "top_p": args.top_p}
+
     model, tokenizer = load_model_and_tokenizer(args.model)
+    from transformers import set_seed
+    set_seed(rng_seed)
     # Offer every vector we can: unverified index entries too (marked as such in the prompt)
-    agent = SteeringAgent(model, tokenizer, model_name=args.model, include_community=True)
+    agent = SteeringAgent(model, tokenizer, model_name=args.model, include_community=True,
+                          control=control, control_seed=rng_seed, disclose_controls=study,
+                          nll_threshold=args.nll_threshold)
     for name, strength in steers:
         ok, msg = agent.apply(name, strength)
         if not ok:
             raise SystemExit(f"--steer {name}: {msg}")
         print(f"[steer] {msg}")
     logger = SessionLogger()
+    logger.log(session_metadata(agent, args, rng_seed, gen_params))
+    print(f"[session] control={'(blinded)' if args.blind else control} rng_seed={rng_seed}")
     kill = KillSwitch()
 
     messages = []
@@ -139,7 +222,7 @@ def main():
 
         print(f"\n--- Turn {turn+1} ---")
         print(f"Steering status:\n{agent.status()}")
-        result = run_turn(agent, messages, logger, turn + 1)
+        result = run_turn(agent, messages, logger, turn + 1, gen_params)
         print(f"\nAssistant: {result.prose}")
         messages.append({"role": "assistant", "content": result.raw_output})
         turn += 1
@@ -165,6 +248,8 @@ def main():
             logger.log_turn(turn + 1, role, nudge)
 
     print(f"\n[session ended after {turn} turns]")
+    if args.blind:
+        print(f"[unblinded] control was: {control}")
     print(f"[log saved to {logger.log_path}]")
 
 
