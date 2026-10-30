@@ -17,6 +17,9 @@ dependencies = [
     "safetensors",
 ]
 
+[project.scripts]
+modulo = "modulo.cli:main"
+
 [project.optional-dependencies]
 # Extra packages used by the repo's scripts (CAA extraction, quantization) and tests
 scripts = ["steering-vectors>=0.12", "datasets>=3.0", "scipy", "bitsandbytes"]

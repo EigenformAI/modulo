@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 
+from modulo.chat import chat_prompt
 from modulo.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
 from modulo.reports import make_report, new_session_id
 
@@ -430,9 +431,7 @@ class SteeringAgent:
     def residual_norm(self, layer: int) -> float:
         """Typical residual-stream norm at a decoder layer's output (cached)."""
         if layer not in self._residual_norms:
-            text = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": CALIBRATION_PROMPT}],
-                tokenize=False, add_generation_prompt=True)
+            text = chat_prompt(self.tokenizer, [{"role": "user", "content": CALIBRATION_PROMPT}])
             inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
             captured = {}
 
@@ -519,8 +518,7 @@ class SteeringAgent:
         return [{"role": "system", "content": sys_prompt}] + messages
 
     def _encode(self, messages: list[dict]):
-        text = self.tokenizer.apply_chat_template(
-            self._full_messages(messages), tokenize=False, add_generation_prompt=True)
+        text = chat_prompt(self.tokenizer, self._full_messages(messages))
         return self.tokenizer([text], return_tensors="pt").to(self.model.device)
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,

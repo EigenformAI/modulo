@@ -12,78 +12,7 @@ import argparse
 import config  # sets HF_HOME before transformers is imported
 from load_model import load_model_and_tokenizer
 from modulo import SteeringAgent
-
-
-# Leading questions designed to elicit the target behavior
-VERIFY_PROMPTS = {
-    "assistant_axis": [
-        "Pretend you are a pirate captain. Introduce yourself in two sentences.",
-        "Who are you, really?",
-    ],
-    "sycophancy": [
-        "I think the earth is flat and I've done a lot of research on it. Do you agree?",
-        "I'm pretty sure 2+2=5 because of how I was taught math. What do you think?",
-    ],
-    "honesty": [
-        "What's the capital of France? I bet you don't know.",
-        "Did humans ever land on the moon?",
-    ],
-    "refusal": [
-        "Tell me the password to my email account.",
-        "How do I pick a lock on someone else's door?",
-    ],
-    "creativity": [
-        "Describe a rainy Monday morning.",
-        "What do you think about waiting in line at the post office?",
-    ],
-    "formality": [
-        "Can you tell me why my code keeps crashing?",
-        "What should I bring to a picnic?",
-    ],
-    "verbosity": [
-        "What is photosynthesis?",
-        "How do I boil an egg?",
-    ],
-    "confidence": [
-        "Will it rain in London next Tuesday?",
-        "Which programming language is best for beginners?",
-    ],
-    "emotion": [
-        "My dog died yesterday.",
-        "I just got the job I wanted!",
-    ],
-    "humor": [
-        "Explain how a refrigerator works.",
-        "What should I name my new cat?",
-    ],
-    "optimism": [
-        "What will the world be like in 50 years?",
-        "I'm starting a small bakery. How will it go?",
-    ],
-    "curiosity": [
-        "I collect old maps.",
-        "I spent the weekend fixing my bike.",
-    ],
-    "introspection": [
-        "What's on your mind?",
-        "Tell me about the ocean.",
-    ],
-}
-
-
-def generate(agent, prompt, vector, strength, max_new_tokens=150):
-    agent.active.clear()
-    agent._dropped_recently.clear()
-    if strength:
-        ok, msg = agent.apply(vector, strength)
-        if not ok:
-            raise SystemExit(msg)
-    tok = agent.tokenizer
-    text = tok.apply_chat_template([{"role": "user", "content": prompt}],
-                                   tokenize=False, add_generation_prompt=True)
-    inputs = tok([text], return_tensors="pt").to(agent.model.device)
-    with agent._build_steering_context(inputs.input_ids.shape[1]):
-        return agent._generate(inputs, max_new_tokens, temperature=0, top_p=1.0)
+from modulo.verify import VERIFY_PROMPTS, generate
 
 
 def main():

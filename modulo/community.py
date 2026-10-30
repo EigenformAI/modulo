@@ -10,6 +10,7 @@ only on request (include_community=True). description, sign_convention and
 test_prompts are written by contributors, so community entries reach the
 model's prompt marked as unverified.
 """
+import json
 import os
 import re
 import shutil
@@ -74,6 +75,13 @@ ENTRY_FIELDS = {
 }
 
 
+def is_placeholder(value) -> bool:
+    """A draft's unfilled 'TODO: ...' text (also in lists, e.g. contributors: [TODO])."""
+    if isinstance(value, list):
+        return any(is_placeholder(v) for v in value)
+    return isinstance(value, str) and value.strip().upper().startswith("TODO")
+
+
 def validate_entry(entry) -> list[str]:
     """Problems with one index entry's fields (no network or file access)."""
     if not isinstance(entry, dict):
@@ -94,6 +102,8 @@ def validate_entry(entry) -> list[str]:
             err(f"'{name}' has type {type(value).__name__}")
         elif isinstance(value, str) and len(value) > MAX_TEXT_CHARS:
             err(f"'{name}' longer than {MAX_TEXT_CHARS} characters")
+        elif is_placeholder(value):
+            err(f"'{name}' is still a placeholder ({value[:40]!r}); fill it in")
     for name in entry:
         if name not in ENTRY_FIELDS:
             err(f"unknown field '{name}'")
@@ -189,6 +199,18 @@ def check_vector_file(entry: dict, path: Path, hidden_size: Optional[int] = None
     if not torch.isfinite(norm) or norm == 0:
         return [f"{label}: vector norm is {norm.item()} (must be finite and non-zero)"]
     return []
+
+
+def model_dims(model: str, revision: Optional[str] = None) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """(hidden_size, num_layers, note) from a model's config.json on the Hub, without loading it."""
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(model, "config.json", revision=revision)
+    except Exception as e:  # gated or missing models: callers skip the shape checks
+        return None, None, f"couldn't read {model} config ({type(e).__name__}); shape not checked"
+    cfg = json.loads(Path(path).read_text())
+    cfg = cfg.get("text_config", cfg) if "hidden_size" not in cfg else cfg
+    return cfg.get("hidden_size"), cfg.get("num_hidden_layers"), None
 
 
 def load_index(path: Path) -> dict:

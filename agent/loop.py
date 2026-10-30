@@ -10,6 +10,7 @@ Usage:
     python -m agent.loop --seed "Hi!"     # seed with a user message
     python -m agent.loop --max-turns 20   # cap turns
     python -m agent.loop --auto           # auto-continue (non-interactive)
+    python -m agent.loop --steer honesty=6 --model Qwen/Qwen2.5-3B-Instruct
 """
 import argparse
 import json
@@ -88,11 +89,29 @@ def main():
                         help="--auto filler when the model makes no tool call: 'status' (default) is a neutral "
                              "tool-role status line with current steering and no suggestion; 'legacy' is the "
                              "old user message suggesting steer")
+    parser.add_argument("--model", default=config.MODEL_NAME, help=f"HF model id (default: {config.MODEL_NAME})")
+    parser.add_argument("--steer", action="append", default=[], metavar="NAME=STRENGTH",
+                        help="apply a vector before the first turn, as if the model had called steer "
+                             "(one full-strength turn, then decay). Repeatable.")
     args = parser.parse_args()
+    steers = []
+    for spec in args.steer:
+        name, _, strength = spec.partition("=")
+        try:
+            steers.append((name.strip(), float(strength)))
+        except ValueError:
+            parser.error(f"--steer expects NAME=STRENGTH, got {spec!r}")
+        if not name.strip():
+            parser.error(f"--steer expects NAME=STRENGTH, got {spec!r}")
 
-    model, tokenizer = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer(args.model)
     # Offer every vector we can: unverified index entries too (marked as such in the prompt)
-    agent = SteeringAgent(model, tokenizer, model_name=config.MODEL_NAME, include_community=True)
+    agent = SteeringAgent(model, tokenizer, model_name=args.model, include_community=True)
+    for name, strength in steers:
+        ok, msg = agent.apply(name, strength)
+        if not ok:
+            raise SystemExit(f"--steer {name}: {msg}")
+        print(f"[steer] {msg}")
     logger = SessionLogger()
     kill = KillSwitch()
 

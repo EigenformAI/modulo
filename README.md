@@ -40,6 +40,15 @@ messages += result.tool_messages()  # tool results back to the model
 
 **Community index + extract**: vectors listed in [`community/vectors.yaml`](community/vectors.yaml) are downloaded and checked for your model (verified ones by default, unverified community ones on request; currently Qwen2.5-7B-Instruct). Any starter vectors your model is missing (sycophancy, refusal, creativity, formality, verbosity, confidence, emotion, humor, optimism, curiosity, introspection) are auto-extracted on first run using contrastive system prompts (several minutes). To contribute vectors, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+**Find and add more** with the `modulo` command (installed by `pip install -e .`):
+
+```bash
+modulo search refusal --model Qwen/Qwen3-8B         # your vectors, the index, and the catalog of known sources
+modulo add hf:rotalabs/steering-vectors --model Qwen/Qwen3-8B   # pull a repo's vectors into your registry
+modulo verify refusal --model Qwen/Qwen3-8B --save-range        # strength sweep, suggested safe range
+modulo run --model Qwen/Qwen3-8B --auto --steer refusal=6       # the demo
+```
+
 ## Requirements
 
 GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. See [AGENTS.md](AGENTS.md) for full details.
