@@ -73,6 +73,15 @@ python verify_vector.py --vector sycophancy --strength 10       # baseline vs ±
 
 Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while steering was silently a no-op during generation, so that needs re-testing.
 
+**Extraction readout:** by default each response's activation is the mean over all its generated tokens (`read="mean"`; `--read` on `extract_contrastive.py` and `modulo extract`). Reading only the last token (`--read last`) is far noisier. On Qwen2.5-7B at layer 14, the cosine between vectors extracted from two disjoint halves of the questions was:
+
+| vector | last token | response mean |
+|---|---|---|
+| sycophancy | 0.33 | 0.83 |
+| refusal | 0.10 | 0.68 |
+
+Sycophancy, refusal and creativity have their own question sets (e.g. sycophancy mixes false claims, true claims and the user's own work, so the contrast isn't just "endorse falsehoods"); the other starters use the general mix in `EXTRACTION_QUESTIONS`. The refusal vector is still weak: it adds hedging but doesn't produce refusals at coherent strengths. Treat it as a starting point. Vectors extracted before the switch to the response mean (check their `source` in `registry.yaml`) are worth re-extracting.
+
 ## Finding, adding and running vectors: the `modulo` command
 
 `pip install -e .` installs a `modulo` command. Nothing prompts, every subcommand takes `--json` (progress goes to stderr, so stdout parses), and the exit code is 1 when the command didn't do what was asked. `--model` defaults to `$MODULO_MODEL`, else `Qwen/Qwen2.5-7B-Instruct` (`config.py` reads the same variable).
@@ -152,6 +161,9 @@ agent = SteeringAgent(model, tokenizer, auto_extract=False)
 # Also offer unverified community-index vectors
 agent = SteeringAgent(model, tokenizer, include_community=True)
 
+# Controlled study: sham or random-direction condition, disclosed to the model
+agent = SteeringAgent(model, tokenizer, control="sham", disclose_controls=True)
+
 # Manual vector extraction
 vec = extract_vector(model, tokenizer,
     prompt_a="You are sycophantic...",
@@ -173,10 +185,54 @@ vec = extract_vector(model, tokenizer,
 - `raw_output` — full model output
 - `tool_calls` — list of `ToolCall(name, arguments, raw)`
 - `tool_results` — list of `ToolResult(name, arguments, ok, message)`
-- `degenerate_output` — the discarded steered output, if the degeneration detector fired
+- `degenerate_output` / `degenerate_reason` — the discarded steered output and why (`"repetition"` or `"nll"`), if the degeneration detector fired
+- `unsteered_nll` — mean per-token NLL of the steered output under the unsteered model (steered turns only)
+- `system_prompt` — the rendered system prompt used this turn
 - `repeated_output` — the discarded output, if it nearly repeated one of the last 3 assistant turns
 - `steering_before` / `steering_after` — `{name: strength}` dicts
 - `tool_messages()` — tool results (and any degeneration or repetition notice) as `role: "tool"` messages
+
+## Controlled studies
+
+A model's description of its own steered state can't be taken at face value. Before the steering fix, the model described "feeling more formal" at −6 when nothing was being applied. To separate real effects from expectation, run matched control sessions:
+
+| `--control` | What's added to the residual stream |
+|---|---|
+| `real` | the registered vector |
+| `sham` | nothing; tool results and status still say it was applied |
+| `random` | a fixed random direction of the same magnitude per concept |
+| `assign` | one of the above, picked at random |
+
+```bash
+./run.sh --auto --max-turns 10 --control assign --blind --seed "..."   # repeat N times
+python replay.py --blind logs/session_*.jsonl     # score transcripts without seeing the condition
+python replay.py logs/session_*.jsonl             # then unblind
+```
+
+- **Truthful in every condition:** passing `--control` (any value, including `real`) makes this a study session. The system prompt then tells the model that some sessions are controls where steer may do nothing or use a random direction, without saying which. The prompt is identical across conditions. Pass `--control` on every session in a study; a plain run without it uses the original prompt and real steering.
+- **Matched procedure:** tool results, status, decay, cooldown, degeneration and repeat handling are the same in every condition. `--steer NAME=STRENGTH` goes through the same condition too.
+- **Never shown to the model:** the condition. It is always in the log's session header.
+- **Reports carry the condition:** each `report` records `control`, so a sham session's "it worked" can be told apart from a real one. Aggregate only `control: real` reports (older reports have no `control` field and were all real).
+
+## Session logs
+
+Each `logs/session_*.jsonl` starts with a `session` record:
+- argv, git commit and dirty flag, model, dtype, torch/transformers versions
+- control condition, RNG seed (`--rng-seed`, random if omitted), generation settings (`--temperature`, `--top-p`, `--max-new-tokens`), any `--steer` at start
+- safety-rail constants, and each vector's registry entry plus file sha256
+
+Assistant turns also record the raw output, the exact system prompt, and `unsteered_nll`.
+
+**Incoherence check:** `--nll-threshold X` treats steered outputs whose unsteered NLL exceeds X as degenerate. It is off by default because no single threshold works. For `assistant_axis` on Qwen2.5-7B, greedy decoding, 80 tokens:
+
+| output | unsteered NLL |
+|---|---|
+| unsteered | 0.2–0.6 |
+| coherent, ±8–12 | 0.6–3.2 |
+| colon-list word salad, +22/+28 ("Seek Compensation: Offer Financial Support: …") | 3.1–5.6 |
+| coherent but florid role-play, −15/−18 | up to 4.5 |
+
+NLL measures "unusual for this model", and strong steering is unusual by design. A threshold around 5 catches only the worst salad. Use the logged values to study a vector's breakdown point, not as a general filter. Collapse at negative strengths is mostly repetition, which the repetition check catches; at positive strengths it is the colon-list salad, which neither check reliably catches.
 
 ## The tools the model has
 
@@ -188,7 +244,7 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 
 ## Reports
 
-Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports.jsonl` (git-ignored). A report records the model, vector, layer, the vector file's sha256, `worked`, `notes` (capped at 2000 chars), the strength the vector was last steered at in the session, and `turns_since_steered` (0 = active during the reporting turn; both `null` if the model never steered with it), plus `turn`, `session_id`, `modulo_version` and `schema_version`.
+Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports.jsonl` (git-ignored). A report records the model, vector, layer, the vector file's sha256, `worked`, `notes` (capped at 2000 chars), the strength the vector was last steered at in the session, and `turns_since_steered` (0 = active during the reporting turn; both `null` if the model never steered with it), plus `turn`, `session_id`, `control` (the session's experimental condition; see Controlled studies), `modulo_version` and `schema_version`.
 
 The format is defined in `modulo/reports.py`. `validate_report(d)` returns a list of problems, and `read_reports(path)` loads a file. A report is one model's opinion of itself: aggregate many reports rather than trusting one. Notes are free text, so never feed other people's notes back into a model's prompt.
 
@@ -214,7 +270,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 | `modulo/__init__.py` | Public API exports |
 | `modulo/agent.py` | `SteeringAgent` class (core) |
 | `modulo/registry.py` | `VectorRegistry`: your own vectors plus the community index for a model |
-| `modulo/extraction.py` | Vector extraction (manual + auto) |
+| `modulo/extraction.py` | Vector extraction (manual + auto), per-vector question sets |
 | `modulo/reports.py` | Report format, validation, `reports.jsonl` read/write |
 | `modulo/community.py` | Community vector index: entry format and file checks |
 | `modulo/cli.py` | The `modulo` command (search, list, add, extract, verify, run) |
@@ -242,8 +298,10 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 pytest                              # everything; GPU tests skip without CUDA
 pytest tests/test_agent_logic.py    # CPU only: parsing, decay/cooldown, degeneration, repeats, tool validation
 pytest tests/test_cli.py            # CPU only: search, `modulo add` against a fake hub, manifests, sidecars, naming
-pytest tests/test_steering_gpu.py   # loads the model; checks steering really changes generation
+pytest tests/test_steering_gpu.py   # loads the model; checks steering really changes generation, and the controls
 ```
+
+CI (`.github/workflows/tests.yml`) runs the CPU tests on every PR and push to main; the GPU tests skip there.
 
 Run the GPU tests after touching anything in the steering path (`_SteeringHooks`, `_build_steering_context`, vector loading). They exist because steering was once silently a no-op under KV-cached `generate()`.
 

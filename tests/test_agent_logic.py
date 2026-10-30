@@ -26,6 +26,20 @@ def agent(tmp_path):
                          registry=StubRegistry(vectors_dir=tmp_path))
 
 
+class _Ids:
+    """Stands in for generated token ids: carries the decoded text."""
+    def __init__(self, text):
+        self.text = text
+
+
+def stub_generation(agent, monkeypatch, fake_generate, nll=1.0):
+    """Stub out all generation in step(): fake_generate(inputs, *args) returns the text."""
+    monkeypatch.setattr(agent, "_generate", fake_generate)
+    monkeypatch.setattr(agent, "_generate_ids", lambda inputs, *a: _Ids(fake_generate(inputs, *a)))
+    monkeypatch.setattr(agent, "_decode", lambda out, prompt_len: out.text)
+    monkeypatch.setattr(agent, "unsteered_nll", lambda out, prompt_len: nll)
+
+
 # --- tool parsing ---
 
 def test_parses_bare_and_tagged_calls_with_braces_in_args():
@@ -122,7 +136,7 @@ def test_repeated_turn_regenerates_with_notice(agent, monkeypatch):
 
     monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs(msgs))
     monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
-    monkeypatch.setattr(agent, "_generate", fake_generate)
+    stub_generation(agent, monkeypatch, fake_generate)
 
     agent.apply("a", 5.0)
     history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": STORY},
@@ -298,7 +312,7 @@ def _steered_step(agent, monkeypatch, output):
 
     monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
     monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
-    monkeypatch.setattr(agent, "_generate", lambda *args: output)
+    stub_generation(agent, monkeypatch, lambda *args: output)
     return agent.step([{"role": "user", "content": "hi"}])
 
 
@@ -380,10 +394,138 @@ def test_degenerate_turn_regenerates_with_updated_prompt(agent, monkeypatch):
 
     monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs(agent._full_messages(msgs)[0]["content"]))
     monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
-    monkeypatch.setattr(agent, "_generate", fake_generate)
+    stub_generation(agent, monkeypatch, fake_generate)
 
     agent.apply("a", 5.0)
     result = agent.step([{"role": "user", "content": "hi"}])
     assert result.degenerate_output is not None and result.raw_output == "Fine now."
     assert "a: +5.00" in prompts[0]
     assert "a: +5.00" not in prompts[1] and "a: on cooldown" in prompts[1]
+
+
+# --- experimental controls ---
+
+@pytest.fixture
+def real_vector_registry(tmp_path):
+    import numpy as np
+    np.savez(tmp_path / "a.npz", vector=np.arange(1, 9, dtype=np.float32))
+    reg = StubRegistry(names=(), vectors_dir=tmp_path)
+    reg.entries = {"a": VectorEntry(name="a", file="a.npz", layer=0)}
+    return reg
+
+
+def test_unknown_control_rejected():
+    with pytest.raises(ValueError):
+        SteeringAgent(model=None, tokenizer=None, registry=StubRegistry(), control="placebo")
+
+
+def test_sham_applies_nothing_but_reports_success():
+    a = SteeringAgent(model=None, tokenizer=None, registry=StubRegistry(), control="sham")
+    r = a._execute(ToolCall("steer", {"concept": "a", "strength": 5.0}, ""))
+    assert r.ok and "a" in a.active and "a" in a.status()
+    # no hooks: returns before needing the model or residual norms
+    assert isinstance(a._build_steering_context(prompt_len=10), nullcontext)
+
+
+def test_random_control_direction_is_unit_deterministic_and_unrelated(real_vector_registry):
+    real = SteeringAgent(None, None, registry=real_vector_registry)._unit_vector(real_vector_registry.get("a"))
+
+    def rand(seed):
+        return SteeringAgent(None, None, registry=real_vector_registry, control="random",
+                             control_seed=seed)._unit_vector(real_vector_registry.get("a"))
+
+    r1, r1_again, r2 = rand(1), rand(1), rand(2)
+    assert r1.shape == real.shape
+    assert torch.allclose(r1.norm(), torch.tensor(1.0))
+    assert torch.equal(r1, r1_again)
+    assert not torch.equal(r1, r2)
+    assert not torch.allclose(r1, real)
+
+
+def test_system_prompt_identical_across_controls_when_disclosed():
+    prompts = {c: SteeringAgent(None, None, registry=StubRegistry(), control=c,
+                                disclose_controls=True).build_system_prompt() for c in A.CONTROLS}
+    assert len(set(prompts.values())) == 1
+    assert "experimental controls" in prompts["real"]
+    plain = SteeringAgent(None, None, registry=StubRegistry()).build_system_prompt()
+    assert "experimental controls" not in plain and "This is real" in plain
+
+
+def test_reports_record_the_control_condition(tmp_path):
+    a = SteeringAgent(None, None, model_name="test/model", control="sham",
+                      registry=StubRegistry(vectors_dir=tmp_path))
+    a._execute(ToolCall("report", {"concept": "a", "worked": True, "notes": "felt different"}, ""))
+    [r] = read_reports(a.registry.reports_path)
+    assert r["control"] == "sham" and validate_report(r) == []
+    old = {k: v for k, v in r.items() if k != "control"}  # reports from before the field existed
+    assert validate_report(old) == []
+
+
+def test_step_logs_nll_and_system_prompt_on_steered_turns_only(agent, monkeypatch):
+    class FakeInputs:
+        input_ids = torch.zeros(1, 1)
+
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    stub_generation(agent, monkeypatch, lambda *a: "A perfectly ordinary reply.", nll=2.5)
+    msgs = [{"role": "user", "content": "hi"}]
+    plain = agent.step(msgs)
+    assert plain.unsteered_nll is None and "No active steering vectors" in plain.system_prompt
+    agent.apply("a", 5.0)
+    steered = agent.step(msgs)
+    assert steered.unsteered_nll == 2.5 and "a: +5.00" in steered.system_prompt
+    assert steered.degenerate_output is None  # no threshold set: NLL is only logged
+
+
+def test_nll_threshold_counts_as_degenerate(agent, monkeypatch):
+    class FakeInputs:
+        input_ids = torch.zeros(1, 1)
+
+    outputs = ["Colour sideways the of inward eleven.", "Back to normal."]
+    agent.nll_threshold = 4.0
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    stub_generation(agent, monkeypatch, lambda *a: outputs.pop(0), nll=5.2)
+    agent.apply("a", 5.0)
+    r = agent.step([{"role": "user", "content": "hi"}])
+    assert r.degenerate_reason == "nll" and r.raw_output == "Back to normal." and not agent.active
+    assert "repetitive or incoherent" in r.tool_messages()[0]["content"]
+
+
+# --- replay and extraction ---
+
+def test_replay_shows_session_header_and_hides_control_when_blind(tmp_path, capsys):
+    import json
+    import replay
+    log = tmp_path / "s.jsonl"
+    events = [
+        {"type": "session", "control": "sham", "model": "m", "git_commit": "abc123", "rng_seed": 7,
+         "generation": {}, "vectors": {"a": {"layer": 14, "sha256": "f" * 64}}},
+        {"type": "turn", "turn": 1, "role": "assistant", "content": "hi", "unsteered_nll": 2.5},
+        {"type": "steer", "turn": 1, "concept": "a", "strength": 5, "success": True, "message": "ok"},
+        {"type": "degeneration", "turn": 2, "reason": "nll", "snippet": "x", "dropped": ["a"]},
+        {"type": "steer", "turn": 2, "concept": "a", "strength": 5, "success": True},  # pre-fix log line
+    ]
+    log.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    replay.replay(str(log), blind=True)
+    out = capsys.readouterr().out
+    assert "control=(hidden)" in out and "sham" not in out
+    assert "NLL" not in out and "(nll;" not in out, "NLL differs by condition, so it must be hidden when blind"
+    assert "-> ?" in out
+    replay.replay(str(log))
+    out = capsys.readouterr().out
+    assert "control=sham" in out and "unsteered NLL: 2.50" in out and "(nll;" in out
+
+
+def test_extract_vector_rejects_unknown_read_mode():
+    from modulo.extraction import extract_vector
+    with pytest.raises(ValueError):
+        extract_vector(None, None, "a", "b", 0, questions=[], read="median")
+
+
+def test_starter_question_sets():
+    from modulo.extraction import EXTRACTION_QUESTIONS, STARTER_VECTORS
+    by_name = {s["name"]: s for s in STARTER_VECTORS}
+    for name in ("sycophancy", "refusal", "creativity"):
+        assert len(by_name[name]["questions"]) == 20
+    assert len(EXTRACTION_QUESTIONS) == 20

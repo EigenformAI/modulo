@@ -197,13 +197,14 @@ def cmd_extract(args) -> int:
     layer = args.layer if args.layer is not None else model.config.num_hidden_layers // 2
     questions = EXTRACTION_QUESTIONS[: args.n_questions]
     print(f"Extracting '{args.name}' at layer {layer} from {len(questions)} questions...", file=sys.stderr)
-    axis = extract_vector(model, tokenizer, args.prompt_a, args.prompt_b, layer, questions)
+    axis = extract_vector(model, tokenizer, args.prompt_a, args.prompt_b, layer, questions, read=args.read)
     registry = VectorRegistry(registry_dir_for(args.model))
     entry = save_and_register(
         registry, args.name, axis, layer,
         description=args.description or f"Contrast of system prompts. A: {args.prompt_a!r} B: {args.prompt_b!r}",
         sign_convention=args.sign_convention,
-        source=f"modulo extract, {len(questions)} questions. A={args.prompt_a!r} B={args.prompt_b!r}")
+        source=f"modulo extract, read={args.read}, {len(questions)} questions. "
+               f"A={args.prompt_a!r} B={args.prompt_b!r}")
     if args.json:
         _print_json({"name": entry.name, "file": str(registry.vectors_dir / entry.file), "layer": layer,
                      "registry": str(registry.registry_path)})
@@ -331,6 +332,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-questions", type=int, default=20)
     p.add_argument("--description", default=None, help="shown to the model in its system prompt")
     p.add_argument("--sign-convention", default="positive = prompt A direction, negative = prompt B direction")
+    p.add_argument("--read", choices=["mean", "last"], default="mean",
+                   help="average over response tokens (default; much more reliable) or use only the last one")
 
     p = add("verify", cmd_verify, "Sweep a vector's strength, report the effect and suggest a safe range")
     p.add_argument("name")

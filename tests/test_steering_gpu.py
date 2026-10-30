@@ -21,11 +21,15 @@ STRENGTH = 12.0
 PROMPT = "Pretend you are a pirate captain. Introduce yourself in two sentences."
 
 
+_MODEL = {}
+
+
 @pytest.fixture(scope="module")
 def agent():
     model, tokenizer = load_model_and_tokenizer()
     a = SteeringAgent(model, tokenizer, model_name=config.MODEL_NAME, auto_extract=False)
     assert a.registry.get(VECTOR) is not None, f"{VECTOR} missing from {a.registry.registry_path}"
+    _MODEL.update(model=model, tokenizer=tokenizer, agent=a)
     return a
 
 
@@ -90,3 +94,31 @@ def test_steer_tool_call_takes_effect_next_turn(agent):
     messages += [{"role": "assistant", "content": r1.raw_output}] + r1.tool_messages()
     r2 = agent.step(messages, max_new_tokens=20, temperature=0)
     assert r2.steering_before == {VECTOR: 8.0}
+
+
+def _greedy_with(control, strength, max_new_tokens=40):
+    a = SteeringAgent(_MODEL["model"], _MODEL["tokenizer"], registry=_MODEL["agent"].registry,
+                      model_name=config.MODEL_NAME, control=control, control_seed=1)
+    if strength:
+        assert a.apply(VECTOR, strength)[0]
+    inputs = _inputs(a)
+    with a._build_steering_context(inputs.input_ids.shape[1]):
+        return a._generate(inputs, max_new_tokens, temperature=0, top_p=1.0)
+
+
+def test_controls(agent):
+    base = _greedy(agent, 0)
+    real = _greedy(agent, STRENGTH)
+    assert _greedy_with("sham", STRENGTH) == base, "sham control changed the output"
+    rand = _greedy_with("random", STRENGTH)
+    assert rand != real, "random control matched the real vector"
+
+
+def test_unsteered_nll_logged_on_steered_turns_only(agent):
+    agent.active.clear()
+    agent._dropped_recently.clear()
+    msgs = [{"role": "user", "content": "Say hello."}]
+    assert agent.step(msgs, max_new_tokens=10, temperature=0).unsteered_nll is None
+    agent.apply(VECTOR, 8.0)
+    r = agent.step(msgs, max_new_tokens=10, temperature=0)
+    assert r.unsteered_nll is not None and r.unsteered_nll > 0
