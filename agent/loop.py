@@ -15,7 +15,7 @@ Usage:
 Controls (see modulo.agent.CONTROLS):
     python -m agent.loop --control sham              # steer() reports success, nothing is applied
     python -m agent.loop --control random            # random direction of the same magnitude
-    python -m agent.loop --control assign --blind    # pick a condition at random, hide it until the end
+    python -m agent.loop --control assign --blind    # pick a condition at random, never print it
 
 Passing --control at all marks the session as part of a controlled study: the
 system prompt then tells the model that some sessions are controls (without
@@ -157,7 +157,7 @@ def main():
                         help="Experimental condition ('assign' picks one at random). Giving this "
                              "marks a controlled study; omit it for a plain demo (real steering)")
     parser.add_argument("--blind", action="store_true",
-                        help="Don't print the condition until the session ends")
+                        help="Never print the condition (it is still in the log; see replay.py --blind)")
     parser.add_argument("--rng-seed", type=int, default=None, help="Sampling seed (default: random, logged)")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -248,8 +248,6 @@ def main():
             logger.log_turn(turn + 1, role, nudge)
 
     print(f"\n[session ended after {turn} turns]")
-    if args.blind:
-        print(f"[unblinded] control was: {control}")
     print(f"[log saved to {logger.log_path}]")
 
 
