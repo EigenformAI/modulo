@@ -7,6 +7,7 @@ import html
 from dataclasses import replace
 
 from modulo.agent import MAX_STRENGTH, SteeringAgent, is_degenerate
+from modulo.chat import chat_prompt
 from modulo.registry import VectorRegistry
 
 # Leading questions designed to elicit the target behavior
@@ -83,8 +84,7 @@ def generate(agent, prompt, vector, strength, max_new_tokens=150):
         if not ok:
             raise SystemExit(msg)
     tok = agent.tokenizer
-    text = tok.apply_chat_template([{"role": "user", "content": prompt}],
-                                   tokenize=False, add_generation_prompt=True)
+    text = chat_prompt(tok, [{"role": "user", "content": prompt}])
     inputs = tok([text], return_tensors="pt").to(agent.model.device)
     with agent._build_steering_context(inputs.input_ids.shape[1]):
         return agent._generate(inputs, max_new_tokens, temperature=0, top_p=1.0)

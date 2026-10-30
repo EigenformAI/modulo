@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from modulo.chat import chat_prompt
 from modulo.registry import VectorEntry, VectorRegistry
 
 
@@ -126,7 +127,7 @@ def _capture_activation_at_last(model, tokenizer, system_prompt, question, layer
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question},
     ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text = chat_prompt(tokenizer, messages)
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
     with torch.inference_mode():
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
