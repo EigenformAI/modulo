@@ -2,8 +2,8 @@
 import os
 from pathlib import Path
 
-# Model
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+# Model (MODULO_MODEL overrides it here and in the `modulo` CLI)
+MODEL_NAME = os.environ.get("MODULO_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 DTYPE = "bf16"  # bfloat16 fits comfortably in 24GB
 DEVICE_MAP = "auto"
 

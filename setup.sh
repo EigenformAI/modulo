@@ -27,6 +27,10 @@ echo "=== Installing Python dependencies ==="
 if ! pip install --break-system-packages --quiet -r requirements.txt; then
     pip install --quiet -r requirements.txt
 fi
+# Editable install: puts the `modulo` command on PATH and keeps vectors/ resolving to this repo
+if ! pip install --break-system-packages --quiet --no-deps -e .; then
+    pip install --quiet --no-deps -e .
+fi
 
 # 2. Create directories
 mkdir -p logs

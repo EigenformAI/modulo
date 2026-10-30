@@ -45,7 +45,9 @@ Required:
 
 Optional but very useful: `revision` (the HF commit of your repo; recommended), `model_revision`, `original_setup`, `known_failure_modes`, `paper`, `contrast_dataset`, `evaluation`, `test_prompts` (up to 5), `notes`. Maintainers set `safe_strength_min`/`safe_strength_max` when promoting.
 
-File formats: a `.safetensors` file must contain exactly one tensor; an `.npz` file stores it under the key `vector`; a `.pt` file is a plain tensor (loaded with `weights_only=True`). With `format: per_layer`, the tensor is indexed by `layer`.
+File formats: a `.safetensors` file must contain exactly one tensor; an `.npz` file stores it under the key `vector`; a `.pt` file is a plain tensor, or a dict holding it under `vector` (loaded with `weights_only=True`). With `format: per_layer`, the tensor is indexed by `layer`.
+
+**Drafting entries automatically.** If your vectors are already on HuggingFace, `modulo add hf:you/your-repo --model <model> --as-index-entry` downloads them, works out `format`, `layer` and `sha256`, checks them against the model's config and prints draft entries pinned to the current commit. Fill in the `TODO` fields and paste them into `community/vectors.yaml`.
 
 ## What the automatic checks do
 

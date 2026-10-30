@@ -10,6 +10,7 @@ only on request (include_community=True). description, sign_convention and
 test_prompts are written by contributors, so community entries reach the
 model's prompt marked as unverified.
 """
+import json
 import os
 import re
 import shutil
@@ -189,6 +190,18 @@ def check_vector_file(entry: dict, path: Path, hidden_size: Optional[int] = None
     if not torch.isfinite(norm) or norm == 0:
         return [f"{label}: vector norm is {norm.item()} (must be finite and non-zero)"]
     return []
+
+
+def model_dims(model: str, revision: Optional[str] = None) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """(hidden_size, num_layers, note) from a model's config.json on the Hub, without loading it."""
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(model, "config.json", revision=revision)
+    except Exception as e:  # gated or missing models: callers skip the shape checks
+        return None, None, f"couldn't read {model} config ({type(e).__name__}); shape not checked"
+    cfg = json.loads(Path(path).read_text())
+    cfg = cfg.get("text_config", cfg) if "hidden_size" not in cfg else cfg
+    return cfg.get("hidden_size"), cfg.get("num_hidden_layers"), None
 
 
 def load_index(path: Path) -> dict:

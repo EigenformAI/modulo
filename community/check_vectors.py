@@ -11,13 +11,13 @@ the checks that judge it:
 Run with --all to re-check every entry's file.
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from modulo.community import check_vector_file, fetch_vector, load_index, validate_index  # noqa: E402
+from modulo.community import model_dims as community_model_dims  # noqa: E402
 
 
 def changed_entries(index: dict, base: dict) -> tuple[list[dict], list[str]]:
@@ -40,15 +40,9 @@ def maintainer_warnings(changed: list[dict], base: dict) -> list[str]:
 
 
 def model_dims(entry: dict) -> tuple[int | None, int | None, str | None]:
-    """(hidden_size, num_layers, note) from the model's config.json on the Hub."""
-    from huggingface_hub import hf_hub_download
-    try:
-        path = hf_hub_download(entry["model"], "config.json", revision=entry.get("model_revision"))
-    except Exception as e:  # gated or missing models: skip the shape checks, don't fail
-        return None, None, f"{entry['id']}: couldn't read {entry['model']} config ({type(e).__name__}); shape not checked"
-    cfg = json.loads(Path(path).read_text())
-    cfg = cfg.get("text_config", cfg) if "hidden_size" not in cfg else cfg
-    return cfg.get("hidden_size"), cfg.get("num_hidden_layers"), None
+    """(hidden_size, num_layers, note) from the entry's model's config.json on the Hub."""
+    hidden, layers, note = community_model_dims(entry["model"], entry.get("model_revision"))
+    return hidden, layers, note and f"{entry['id']}: {note}"
 
 
 def check(index_path: Path, base_path: Path | None, check_all: bool) -> tuple[list[str], list[str], list[str] | None]:

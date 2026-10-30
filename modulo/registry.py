@@ -52,23 +52,43 @@ class VectorEntry:
 
     def load_vector(self, vectors_dir: Path) -> torch.Tensor:
         """Load the actual vector tensor for this entry's layer."""
-        path = Path(vectors_dir) / self.file
-        if self.file.endswith(".safetensors"):
-            from safetensors.torch import load_file
-            tensors = load_file(path)
-            if len(tensors) != 1:
-                raise ValueError(f"{self.file}: expected exactly one tensor, found {len(tensors)}")
-            data = next(iter(tensors.values()))
-        elif self.file.endswith(".npz"):
-            import numpy as np
-            data = torch.tensor(np.load(path)["vector"])
-        elif self.file.endswith(".pt"):
-            data = torch.load(path, map_location="cpu", weights_only=True)
-        else:
-            raise ValueError(f"Unknown vector format: {self.file}")
+        data = load_tensor_file(Path(vectors_dir) / self.file)
         if self.format == "per_layer":  # [num_layers, hidden], indexed by layer
             data = data[self.layer]
         return data.to(torch.bfloat16)
+
+
+def load_tensor_file(path: Path) -> torch.Tensor:
+    """The single tensor stored in a .safetensors, .npz (key 'vector') or .pt file.
+
+    A .pt file may hold a dict: its 'vector' entry, or its only tensor, is used
+    (other entries, such as layer or model metadata, are ignored here).
+    """
+    path = Path(path)
+    if path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+        tensors = load_file(path)
+        if len(tensors) != 1:
+            raise ValueError(f"{path.name}: expected exactly one tensor, found {len(tensors)}")
+        data = next(iter(tensors.values()))
+    elif path.suffix == ".npz":
+        import numpy as np
+        data = torch.tensor(np.load(path)["vector"])
+    elif path.suffix == ".pt":
+        data = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(data, dict):
+            tensors = [v for v in data.values() if isinstance(v, torch.Tensor)]
+            if isinstance(data.get("vector"), torch.Tensor):
+                data = data["vector"]
+            elif len(tensors) == 1:
+                data = tensors[0]
+            else:
+                raise ValueError(f"{path.name}: dict with {len(tensors)} tensors and no 'vector' key")
+        if not isinstance(data, torch.Tensor):
+            raise ValueError(f"{path.name}: expected a tensor, found {type(data).__name__}")
+    else:
+        raise ValueError(f"Unknown vector format: {path.name}")
+    return data
 
 
 class VectorRegistry:
@@ -121,14 +141,29 @@ class VectorRegistry:
             )
         return "\n".join(lines)
 
+    @property
+    def index_names(self) -> set[str]:
+        """Names of the vectors that came from the community index."""
+        return set(self._index_names)
+
     def save(self):
-        """Save your own vectors back to YAML (index vectors are left out)."""
+        """Save your own vectors back to YAML (index vectors are left out).
+
+        The file's leading comment block, if any, is kept.
+        """
         data = []
         for entry in self.entries.values():
             if entry.name not in self._index_names:
                 data.append(dict(entry.__dict__))
+        header = []
+        if self.registry_path.exists():
+            for line in self.registry_path.read_text().splitlines(keepends=True):
+                if not line.startswith("#"):
+                    break
+                header.append(line)
         self.vectors_dir.mkdir(parents=True, exist_ok=True)
         with open(self.registry_path, "w") as f:
+            f.writelines(header)
             yaml.safe_dump(data, f, default_flow_style=False)
 
     def add_entry(self, entry: VectorEntry):
@@ -147,6 +182,16 @@ class VectorRegistry:
             self._index_names.add(entry.name)
         return notes
 
+    def load_index_vectors(self, model_name: str, include_community: bool = False,
+                           index_path: Optional[Path] = None, hidden_size: Optional[int] = None,
+                           num_layers: Optional[int] = None) -> list[str]:
+        """Add the model's community-index vectors (downloading files as needed). Returns notes."""
+        from modulo.community import index_entries_for
+        entries, notes = index_entries_for(
+            model_name, self.vectors_dir, index_path=index_path, include_community=include_community,
+            hidden_size=hidden_size, num_layers=num_layers)
+        return notes + self.add_index_entries(entries)
+
     @classmethod
     def for_model(cls, model_name: str, base_dir: Optional[Path] = None,
                   auto_extract: bool = True, model=None, tokenizer=None,
@@ -159,18 +204,16 @@ class VectorRegistry:
         auto_extract=True, extracts any starter vectors (contrastive system
         prompts, see extraction.STARTER_VECTORS) the model doesn't have yet.
         """
-        from modulo.community import index_entries_for
         from modulo.extraction import STARTER_VECTORS
         vectors_dir = registry_dir_for(model_name, base_dir)
         vectors_dir.mkdir(parents=True, exist_ok=True)
         registry = cls(vectors_dir)
 
         config = getattr(model, "config", None)
-        entries, notes = index_entries_for(
-            model_name, vectors_dir, index_path=index_path, include_community=include_community,
+        notes = registry.load_index_vectors(
+            model_name, include_community=include_community, index_path=index_path,
             hidden_size=getattr(config, "hidden_size", None),
             num_layers=getattr(config, "num_hidden_layers", None))
-        notes += registry.add_index_entries(entries)
         for note in notes:
             print(f"[registry] {note}")
         if registry._index_names:
