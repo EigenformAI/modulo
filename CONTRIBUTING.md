@@ -47,7 +47,9 @@ Optional but very useful: `revision` (the HF commit of your repo; recommended), 
 
 File formats: a `.safetensors` file must contain exactly one tensor; an `.npz` file stores it under the key `vector`; a `.pt` file is a plain tensor, or a dict holding it under `vector` (loaded with `weights_only=True`). With `format: per_layer`, the tensor is indexed by `layer`.
 
-**Drafting entries automatically.** If your vectors are already on HuggingFace, `modulo add hf:you/your-repo --model <model> --as-index-entry` downloads them, works out `format`, `layer` and `sha256`, checks them against the model's config and prints draft entries pinned to the current commit. Fill in the `TODO` fields and paste them into `community/vectors.yaml`.
+**Drafting entries automatically.** If your vectors are already on HuggingFace, `modulo add hf:you/your-repo --model <model> --as-index-entry` downloads them, works out `format`, `layer` and `sha256`, checks them against the model's config and prints draft entries pinned to the current commit. Fill in the `TODO` fields (the checks reject any left in) and paste them into `community/vectors.yaml`.
+
+**Several vectors?** Describe them in a `modulo-bundle.yaml` at your repo's root (format in [AGENTS.md](AGENTS.md#bundle-manifests-modulo-bundleyaml)). Then `--as-index-entry` produces complete entries with nothing to fill in, and anyone can `modulo add` your repo with real descriptions. Draft one from your files with `modulo add ./your-dir --model <model> --as-manifest`, and check it with `--dry-run` before uploading.
 
 ## What the automatic checks do
 

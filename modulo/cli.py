@@ -2,7 +2,7 @@
 
     modulo search [QUERY] [--model M]        your vectors, the community index and the catalog
     modulo list [--model M]                  what SteeringAgent would load for a model, and why
-    modulo add hf:OWNER/REPO[@REV] [--model M] [--files GLOB] [--dry-run | --as-index-entry]
+    modulo add hf:OWNER/REPO[@REV]|DIR [--model M] [--files GLOB] [--dry-run | --as-index-entry | --as-manifest]
     modulo extract --name N --prompt-a A --prompt-b B [--model M]
     modulo verify NAME [--model M] [--save-range]
     modulo run [demo args]                   the standalone demo (agent/loop.py)
@@ -24,6 +24,7 @@ from pathlib import Path
 if Path("/workspace").is_dir():
     os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
 
+from modulo.bundle import MANIFEST_NAME  # noqa: E402
 from modulo.registry import VectorRegistry, registry_dir_for  # noqa: E402
 
 DEFAULT_MODEL = os.environ.get("MODULO_MODEL", "Qwen/Qwen2.5-7B-Instruct")
@@ -106,12 +107,13 @@ def cmd_list(args) -> int:
 # --- add ---
 
 # Skip reasons that are expected in a bundle; listed only with --verbose
-QUIET_SKIPS = ("another layer", "path doesn't name", "layer ", "file says it's for")
+QUIET_SKIPS = ("another layer", "path doesn't name", "layer ", "file says it's for",
+               "the manifest lists it for", "not matched by --files")
 
 
 def cmd_add(args) -> int:
     import yaml
-    from modulo.importer import index_entry, plan_add, register
+    from modulo.importer import draft_manifest, index_entry, plan_add, register
     try:
         plan = plan_add(args.spec, args.model, files=args.files, layer=args.layer,
                         repo_type=args.repo_type, max_files=args.max_files, all_layers=args.all_layers)
@@ -121,48 +123,69 @@ def cmd_add(args) -> int:
     ok = plan.ok
     if (args.description or args.sign_convention) and len(ok) > 1:
         print("error: --description/--sign-convention would apply to all "
-              f"{len(ok)} vectors; narrow with --files or add without them and edit registry.yaml",
+              f"{len(ok)} vectors; narrow with --files, or describe them in a {MANIFEST_NAME}",
               file=sys.stderr)
+        return 1
+    if args.as_index_entry and plan.is_local:
+        print("error: --as-index-entry needs a HuggingFace repo (index entries point at hosted files); "
+              "upload the directory first, or use --as-manifest", file=sys.stderr)
         return 1
 
     result = plan.to_dict()
     messages = []
     if args.as_index_entry:
         result["index_entries"] = [index_entry(plan, c, args.description, args.sign_convention) for c in ok]
+    elif args.as_manifest:
+        result["manifest_draft"] = draft_manifest(plan)
     elif not args.dry_run and ok:
         registry = VectorRegistry(registry_dir_for(args.model))
         messages = register(plan, registry, args.description, args.sign_convention, replace=args.replace)
         result["registry"] = str(registry.registry_path)
     result["messages"] = messages
-
     if args.json:
         _print_json(result)
-    else:
-        print(f"{plan.repo_type} {plan.repo_id} @ {plan.revision[:12]} for {plan.model} "
-              f"(hidden {plan.hidden_size}, {plan.num_layers} layers)")
-        for n in plan.notes:
-            print(f"  note: {n}")
-        for c in plan.candidates:
-            if c.ok:
-                print(f"  ok    {c.filename} -> {c.name} ({c.format}, layer {c.layer}, shape {c.shape})")
-                for n in c.notes:
-                    print(f"          {n}")
-            elif args.verbose or not c.reason.startswith(QUIET_SKIPS):
-                print(f"  skip  {c.filename}: {c.reason}")
-        quiet = [c for c in plan.candidates if not c.ok and not args.verbose
-                 and c.reason.startswith(QUIET_SKIPS)]
-        if quiet:
-            print(f"  ({len(quiet)} more skipped: other layers of the same concepts, or files for other models; "
-                  "--verbose lists them)")
-        if args.as_index_entry and ok:
-            print("\n# Draft entries for community/vectors.yaml; fill in the TODOs (see CONTRIBUTING.md):")
-            print(yaml.safe_dump(result["index_entries"], sort_keys=False, width=100))
-        elif args.dry_run and ok:
-            print("\nDry run: nothing registered. Files are in the HF cache.")
-        for m in messages:
-            print(f"  {m}")
-        if any(": added" in m for m in messages):
-            print("\nImported vectors are unverified (±8 range). Next: modulo verify <name> --save-range")
+        return 0 if ok else 1
+
+    # Drafts go to stdout alone (so `> file` works); the summary goes to stderr
+    drafting = args.as_index_entry or args.as_manifest
+    out = sys.stderr if drafting else sys.stdout
+
+    def say(line=""):
+        print(line, file=out)
+
+    where = f"{plan.repo_type} {plan.repo_id}" + (f" @ {plan.revision[:12]}" if plan.revision else "")
+    say(f"{where} for {plan.model} (hidden {plan.hidden_size}, {plan.num_layers} layers)")
+    if plan.manifest:
+        say(f"  described by its {plan.manifest}")
+    for n in plan.notes:
+        say(f"  note: {n}")
+    for c in plan.candidates:
+        if c.ok:
+            say(f"  ok    {c.filename} -> {c.name} ({c.format}, layer {c.layer}, shape {c.shape})")
+            for n in c.notes:
+                say(f"          {n}")
+        elif args.verbose or not c.reason.startswith(QUIET_SKIPS):
+            say(f"  skip  {c.filename}: {c.reason}")
+    quiet = [c for c in plan.candidates if not c.ok and not args.verbose and c.reason.startswith(QUIET_SKIPS)]
+    if quiet:
+        say(f"  ({len(quiet)} more skipped: other layers of the same concepts, or files for other models; "
+            "--verbose lists them)")
+    undescribed = [c.name for c in ok if not (args.description or c.meta.get("description"))]
+    if args.as_index_entry and ok:
+        say("\nDraft entries for community/vectors.yaml on stdout; fill in any TODOs (see CONTRIBUTING.md).")
+        print(yaml.safe_dump(result["index_entries"], sort_keys=False, width=100, allow_unicode=True))
+    elif args.as_manifest and ok:
+        say(f"\nDraft {MANIFEST_NAME} on stdout; fill in the TODOs and put it at the repo's root.")
+        print(yaml.safe_dump(result["manifest_draft"], sort_keys=False, width=100, allow_unicode=True))
+    elif args.dry_run and ok:
+        say("\nDry run: nothing registered." + ("" if plan.is_local else " Files are in the HF cache."))
+    for m in messages:
+        say(f"  {m}")
+    if any(": added" in m for m in messages):
+        if undescribed:
+            say(f"\nNo description for {', '.join(undescribed)}: the model only sees a placeholder. "
+                f"Edit registry.yaml, or describe them in a {MANIFEST_NAME}.")
+        say("\nImported vectors are unverified (±8 range). Next: modulo verify <name> --save-range")
     return 0 if ok else 1
 
 
@@ -280,8 +303,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("list", cmd_list, "Show what SteeringAgent would load for a model")
     p.add_argument("--include-community", action="store_true", help="also unverified community-index vectors")
 
-    p = add("add", cmd_add, "Add vectors from a HuggingFace repo to your registry")
-    p.add_argument("spec", help="hf:owner/repo[@revision], hf:datasets/owner/repo, or a huggingface.co URL")
+    p = add("add", cmd_add, "Add vectors from a HuggingFace repo or a local directory to your registry")
+    p.add_argument("spec", help="hf:owner/repo[@revision], hf:datasets/owner/repo, a huggingface.co URL, "
+                   f"or a local directory (uses its {MANIFEST_NAME} if it has one)")
     p.add_argument("--files", nargs="+", help="glob(s) over repo paths, e.g. 'qwen2.5-7b/*.pt'")
     p.add_argument("--layer", type=int, help="only files for this layer; for per_layer files, the row to use "
                    "(default: one layer per concept, nearest the middle)")
@@ -296,6 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="inspect only; register nothing")
     mode.add_argument("--as-index-entry", action="store_true",
                       help="print draft community/vectors.yaml entries instead of registering")
+    mode.add_argument("--as-manifest", action="store_true",
+                      help=f"print a draft {MANIFEST_NAME} for what was found instead of registering")
 
     p = add("extract", cmd_extract, "Extract a vector from two contrasting system prompts and register it")
     p.add_argument("--name", required=True)

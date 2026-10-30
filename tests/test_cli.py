@@ -204,12 +204,16 @@ def test_register_is_idempotent_and_protects_your_vectors(hub, tmp_path):
     assert sorted(p.name for p in reloaded.vectors_dir.glob("calm*")) == ["calm_layer1_" + plan2.ok[0].sha256[:8] + ".pt"]
 
 
-def test_index_entry_draft_is_valid(hub):
+def test_index_entry_draft_needs_its_todos_filled(hub):
     hub.put("calm_layer1.pt", torch.randn(HIDDEN))
     plan = plan_add("hf:someone/calm", MODEL)
     entry = importer.index_entry(plan, plan.ok[0])
-    assert validate_entry(entry) == []
     assert entry["trust"] == "community" and "safe_strength_min" not in entry
+    errors = validate_entry(entry)
+    assert errors and all("placeholder" in e for e in errors)
+    entry.update(description="Calmer.", sign_convention="+ calm", extraction_method="CAA",
+                 contributors=["Me"])
+    assert validate_entry(entry) == []
 
 
 def test_cli_add_json(hub, tmp_path, monkeypatch, capsys):
@@ -262,3 +266,171 @@ def test_search_across_sources(tmp_path):
     assert [h.name for h in search("tone", **kw)][-1] == "other-pack"  # no model filter
     assert search("happier TONE", **kw)[0].name == "joy"                # every word, any case
     assert search("nothing-matches", **kw) == []
+
+
+# --- bundle manifests (modulo-bundle.yaml) ---
+
+from modulo.bundle import MANIFEST_NAME, validate_manifest  # noqa: E402
+
+
+def manifest(**overrides):
+    data = {
+        "modulo_bundle": 1, "model": MODEL, "license": "mit", "contributors": ["A Researcher"],
+        "extraction_method": "CAA",
+        "vectors": [
+            {"name": "calm", "filename": "calm.pt", "layer": 1,
+             "description": "Calmer replies.", "sign_convention": "+ calm, - agitated",
+             "test_prompts": ["My train is late again."]},
+            {"name": "joy", "filename": "axis.pt", "layer": 2,
+             "description": "Happier tone.", "sign_convention": "+ happy, - glum"},
+        ],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_valid_manifest():
+    assert validate_manifest(manifest()) == []
+
+
+@pytest.mark.parametrize("change, expected", [
+    ({"modulo_bundle": 2}, "format version"),
+    ({"vectors": []}, "non-empty list"),
+    ({"trust": "verified"}, "'trust' isn't set in a manifest"),
+    ({"filename": "x.pt"}, "can't be a top-level default"),
+    ({"colour": "red"}, "unknown top-level field"),
+])
+def test_bad_manifest_top_level(change, expected):
+    assert any(expected in e for e in validate_manifest(manifest(**change)))
+
+
+@pytest.mark.parametrize("vector_change, expected", [
+    ({"description": None}, "'description' has type NoneType"),
+    ({"safe_strength_max": 30.0}, "isn't set in a manifest"),
+    ({"name": "Calm Vector"}, "'name' must be"),
+    ({"filename": "calm.pkl"}, "'filename' must end with"),
+    ({"format": "stacked"}, "'format' must be one of"),
+    ({"layer": -1}, "'layer' must be >= 0"),
+    ({"test_prompts": ["p"] * 6}, "'test_prompts' must be"),
+    ({"name": "joy"}, "already named 'joy'"),
+    ({"sha256": "0" * 64}, "isn't set in a manifest"),
+])
+def test_bad_manifest_vectors(vector_change, expected):
+    data = manifest()
+    data["vectors"][0].update(vector_change)
+    assert any(expected in e for e in validate_manifest(data))
+
+
+def test_manifest_needs_model_and_description_somewhere():
+    data = manifest()
+    del data["model"]
+    del data["vectors"][1]["description"]
+    errors = validate_manifest(data)
+    assert any("missing 'model'" in e for e in errors) and any("missing 'description'" in e for e in errors)
+
+
+def write_manifest(hub, data):
+    (hub.dir / MANIFEST_NAME).write_text(yaml.safe_dump(data))
+
+
+def test_manifest_bundle_is_described_and_filtered(hub, tmp_path):
+    hub.put("calm.pt", torch.randn(HIDDEN))
+    hub.put("axis.pt", torch.randn(LAYERS, HIDDEN))
+    hub.put("unlisted_layer1.pt", torch.randn(HIDDEN))          # not in the manifest: ignored
+    data = manifest()
+    data["vectors"].append({"name": "other", "filename": "calm.pt", "layer": 3, "model": "org/other",
+                            "description": "x", "sign_convention": "y"})
+    data["vectors"].append({"name": "gone", "filename": "missing.pt", "layer": 1,
+                            "description": "x", "sign_convention": "y"})
+    write_manifest(hub, data)
+
+    plan = plan_add("hf:someone/bundle", MODEL)
+    assert plan.manifest == MANIFEST_NAME
+    ok = by_name(plan)
+    assert sorted(ok) == ["calm", "joy"]
+    assert (ok["joy"].format, ok["joy"].layer) == ("per_layer", 2)  # the manifest's row, not the middle
+    reasons = {c.filename: c.reason for c in plan.candidates if not c.ok}
+    assert "lists it for org/other" in reasons["calm.pt"] and "not in the repo" in reasons["missing.pt"]
+    assert "unlisted_layer1.pt" not in reasons
+
+    registry = VectorRegistry(tmp_path / "vectors")
+    register(plan, registry)
+    assert registry.get("calm").description == UNVERIFIED_IMPORT_PREFIX + "Calmer replies."
+    assert registry.get("joy").sign_convention == "+ happy, - glum"
+
+    entry = importer.index_entry(plan, ok["calm"])
+    assert validate_entry(entry) == []
+    assert "TODO" not in json.dumps(entry)
+    assert entry["test_prompts"] == ["My train is late again."] and entry["contributors"] == ["A Researcher"]
+
+
+def test_manifest_shape_must_match_its_format(hub):
+    hub.put("calm.pt", torch.randn(LAYERS, HIDDEN))
+    data = manifest()
+    data["vectors"] = [{**data["vectors"][0], "format": "single"}]
+    write_manifest(hub, data)
+    plan = plan_add("hf:someone/bundle", MODEL)
+    assert not plan.ok and "listed as single" in plan.candidates[0].reason
+
+
+def test_invalid_manifest_is_an_error(hub):
+    write_manifest(hub, manifest(trust="verified"))
+    with pytest.raises(ValueError, match="has problems"):
+        plan_add("hf:someone/bundle", MODEL)
+
+
+# --- sidecar metadata (rotalabs layout) ---
+
+def test_sidecars_give_name_layer_and_best_layer(hub):
+    d = "refusal_test_model_4b"
+    for layer in range(LAYERS):
+        hub.put(f"{d}/layer_{layer}.pt", torch.randn(HIDDEN))
+        (hub.dir / d / f"layer_{layer}.json").write_text(json.dumps(
+            {"behavior": "refusal", "layer_index": layer, "model_name": MODEL, "extraction_method": "caa"}))
+    (hub.dir / d / "metadata.json").write_text(json.dumps(
+        {"behavior": "refusal", "model_name": MODEL, "best_layer": 1}))
+    plan = plan_add("hf:someone/rota", MODEL)
+    [c] = plan.ok
+    assert (c.name, c.layer) == ("refusal", 1)     # best_layer, not the middle (2)
+    assert importer.index_entry(plan, c)["extraction_method"] == "caa"
+    assert any("best_layer" in x.reason for x in plan.candidates if not x.ok)
+
+
+def test_sidecar_naming_another_model_is_skipped(hub):
+    hub.put("calm_layer1.pt", torch.randn(HIDDEN))
+    (hub.dir / "calm_layer1.json").write_text(json.dumps({"model_name": "org/other"}))
+    plan = plan_add("hf:someone/x", MODEL)
+    assert not plan.ok and "for org/other" in plan.candidates[0].reason
+
+
+# --- local directories and drafts ---
+
+def test_local_directory_and_manifest_round_trip(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(importer, "model_dims", lambda model, revision=None: (HIDDEN, LAYERS, None))
+    src = tmp_path / "mine"
+    src.mkdir()
+    torch.save(torch.randn(HIDDEN), src / "calm_layer1.pt")
+    torch.save(torch.randn(LAYERS, HIDDEN), src / "axis.pt")
+
+    plan = plan_add(str(src), MODEL)
+    assert plan.is_local and plan.revision is None and sorted(by_name(plan)) == ["axis", "calm"]
+    draft = importer.draft_manifest(plan)
+    assert any("placeholder" in e for e in validate_manifest(draft))  # unfilled TODOs never reach a prompt
+    draft["contributors"] = ["Me"]
+    for v in draft["vectors"]:
+        v["description"], v["sign_convention"] = f"About {v['name']}.", "+ more, - less"
+    assert validate_manifest(draft) == []
+    (src / MANIFEST_NAME).write_text(yaml.safe_dump(draft))
+
+    plan = plan_add(str(src), MODEL)
+    assert plan.manifest and by_name(plan)["axis"].meta["description"] == "About axis."
+    registry = VectorRegistry(tmp_path / "vectors")
+    register(plan, registry)
+    assert registry.get("calm").source.startswith(f"local:{src}/calm_layer1.pt")
+
+    monkeypatch.setattr(cli, "registry_dir_for", lambda model: tmp_path / "vectors")
+    assert cli.main(["add", str(src), "--model", MODEL, "--as-index-entry"]) == 1  # needs a hosted repo
+    capsys.readouterr()
+    assert cli.main(["add", str(src), "--model", MODEL, "--as-manifest"]) == 0
+    out = capsys.readouterr().out
+    assert yaml.safe_load(out)["vectors"][0]["description"].startswith("About")  # stdout is only YAML

@@ -75,6 +75,13 @@ ENTRY_FIELDS = {
 }
 
 
+def is_placeholder(value) -> bool:
+    """A draft's unfilled 'TODO: ...' text (also in lists, e.g. contributors: [TODO])."""
+    if isinstance(value, list):
+        return any(is_placeholder(v) for v in value)
+    return isinstance(value, str) and value.strip().upper().startswith("TODO")
+
+
 def validate_entry(entry) -> list[str]:
     """Problems with one index entry's fields (no network or file access)."""
     if not isinstance(entry, dict):
@@ -95,6 +102,8 @@ def validate_entry(entry) -> list[str]:
             err(f"'{name}' has type {type(value).__name__}")
         elif isinstance(value, str) and len(value) > MAX_TEXT_CHARS:
             err(f"'{name}' longer than {MAX_TEXT_CHARS} characters")
+        elif is_placeholder(value):
+            err(f"'{name}' is still a placeholder ({value[:40]!r}); fill it in")
     for name in entry:
         if name not in ENTRY_FIELDS:
             err(f"unknown field '{name}'")

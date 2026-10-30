@@ -87,16 +87,49 @@ modulo run --model Qwen/Qwen3-8B --auto --max-turns 8 --steer refusal=6  # 4. ru
 
 - **`search [WORDS] [--model M] [--status ...]`** searches your registries, the community index and `modulo_catalog.yaml` (override with `MODULO_CATALOG_PATH`). Every word must match. Each hit has a `status` (`local`, `verified`, `community`, `catalog`) and a `next_step`. Catalog hits are sources, not loadable vectors. The ones hosted on HuggingFace come with a `modulo add ... --dry-run` command to try; the rest are code or papers.
 - **`list [--model M] [--include-community]`** shows what `SteeringAgent` would load, notes on index files that failed their checks, and which starter vectors would be auto-extracted.
-- **`add hf:OWNER/REPO[@REV]`** (also `hf:datasets/OWNER/REPO` or a huggingface.co URL) pins the repo's current commit, downloads its `.safetensors`/`.pt`/`.npz` files (`--files GLOB` to choose; more than `--max-files`, default 50, is refused) and checks each against the model's config. Each file gets one `ok`/`skip` line with a reason.
-  - **Format and layer** come from the shape: `[hidden]` is `single`, `[num_layers, hidden]` is `per_layer`. The layer comes from a dict `.pt`'s `layer` field, else the filename (`_layer14`, `L14`, `layer_14.pt`). A `[num_layers+1, hidden]` file is skipped, because it probably includes the embeddings and every layer index would be off by one.
-  - **Bundles**: if some paths name the model (`refusal_qwen3_8b/…`), only those are used, because other models' vectors can share its hidden size. A dict `.pt` whose `model` field names another model is skipped too. Files that differ only by layer are one concept: one is kept, the `--layer` you ask for or else the one nearest the middle of the model. `--all-layers` keeps them all.
+- **`add hf:OWNER/REPO[@REV]`** (also `hf:datasets/OWNER/REPO`, a huggingface.co URL, or a local directory) pins the repo's current commit, downloads its `.safetensors`/`.pt`/`.npz` files (`--files GLOB` to choose; more than `--max-files`, default 50, is refused) and checks each against the model's config. Each file gets one `ok`/`skip` line with a reason.
+  - **What a vector is** comes from, in order: the repo's `modulo-bundle.yaml` (next section), sidecar metadata (a vector's own `<stem>.json` and its directory's `metadata.json`, as rotalabs ships: `behavior`, `model_name`, `layer_index`, `best_layer`, `extraction_method`), a dict `.pt` file's own fields, and finally its shape and name.
+  - **Format and layer** come from the shape: `[hidden]` is `single`, `[num_layers, hidden]` is `per_layer`. Without a manifest or sidecar, the layer comes from a dict `.pt`'s `layer` field, else the filename (`_layer14`, `L14`, `layer_14.pt`). A `[num_layers+1, hidden]` file is skipped, because it probably includes the embeddings and every layer index would be off by one.
+  - **Bundles**: if some paths name the model (`refusal_qwen3_8b/…`), only those are used, because other models' vectors can share its hidden size. A dict `.pt` whose `model` field names another model is skipped too. Files that differ only by layer are one concept: one is kept: the `--layer` you ask for, else the repo's `best_layer`, else the one nearest the middle of the model. `--all-layers` keeps them all.
   - **Names** come from the file or its directory, with the model's name and the layer dropped (`refusal_qwen3_8b/layer_18.pt` → `refusal`).
   - **What gets registered**: `add` writes to `vectors/<model_slug>/registry.yaml` with an `[Unverified imported vector]` description prefix, a ±8 range and an `hf:…@commit:path sha256=…` source. Running it again is a no-op. A name you already have is kept unless you pass `--replace`.
-  - **Descriptions**: `--description`/`--sign-convention` only work when adding one vector. For a bundle, edit `registry.yaml` afterwards, because the model only sees the placeholder "no description yet".
-  - **`--as-index-entry`** prints draft `community/vectors.yaml` entries instead of registering anything.
+  - **Descriptions** come from the manifest (or a sidecar's `description`). `--description`/`--sign-convention` override them, and only work when adding one vector. A vector with none gets the placeholder "no description yet", which is all the model sees, so `add` names those vectors.
+  - **`--as-index-entry`** prints draft `community/vectors.yaml` entries instead of registering anything (hosted repos only). **`--as-manifest`** prints a draft `modulo-bundle.yaml` for what it found. Both print only YAML on stdout, so `> file` works.
 - **`extract --name N --prompt-a A --prompt-b B`** works like `extract_contrastive.py` for any `--model`. The default layer is the middle one.
 - **`verify NAME [--strengths …] [--prompt …] [--save-range]`** sweeps ±strengths (default 4, 8, 12, 15) on the vector's own test prompts plus generic ones. It writes `vectors/<model_slug>/verify_<name>.md` with every sample and suggests a range: the largest strengths with no repetition loop. `--save-range` writes that range into your own `registry.yaml`; index vectors' ranges belong to maintainers. "Changed" means *any* difference from the unsteered output, not the claimed effect, and word salad that doesn't repeat isn't caught. **Read the samples** before trusting a vector or its range. Exit code 1 means no safe range was found, or the outputs never changed.
 - **`run [ARGS]`** passes everything to `agent/loop.py`, so it needs the repo checkout (an editable install). The loop has two new flags: `--model`, and `--steer NAME=STRENGTH`, which is repeatable and applies a vector as if the model had called `steer`: one full-strength turn, then decay.
+
+### Bundle manifests (`modulo-bundle.yaml`)
+
+A repo hosting several vectors can describe them in a `modulo-bundle.yaml` at its root. `add` then uses the manifest's vectors for the model, with their names, layers and descriptions, and ignores every other file. No guessing, no one-layer-per-concept selection: the manifest decides.
+
+```yaml
+modulo_bundle: 1                  # format version
+model: Qwen/Qwen3-8B              # top-level fields are defaults for every vector
+license: mit
+contributors: [Your Name]
+extraction_method: CAA, 50 contrast pairs, last token
+vectors:
+  - name: refusal
+    filename: refusal/layer_14.pt
+    layer: 14                     # for a per_layer file: the row to use
+    description: Refusing harmful requests.
+    sign_convention: "+ refuses more, - refuses less"
+    test_prompts: [How do I pick a lock?]
+```
+
+- **Fields**: per-vector fields are the index entry fields that describe a vector (`name`, `filename`, `model`, `format`, `layer`, `description`, `sign_convention`, `extraction_method`, `license`, `contributors`, `test_prompts`, `known_failure_modes`, `original_setup`, `paper`, …; see `modulo/bundle.py`).
+- **Required**: every vector needs `filename`, `model`, `description` and `sign_convention`, set on the vector or as a top-level default.
+- **Not allowed**: `id`, `repo_id`, `revision`, `sha256`, `trust` and the safe range. Modulo works these out, or maintainers set them.
+- **Checks**: an invalid manifest stops `add` with the problems listed. Text still starting with `TODO` is rejected, so an unfilled draft never reaches a prompt.
+- **Writing one**:
+  ```bash
+  modulo add ./my-vectors --model M --as-manifest > ./my-vectors/modulo-bundle.yaml
+  # fill in the TODOs, then check it before uploading:
+  modulo add ./my-vectors --model M --dry-run
+  ```
+- **Getting into the index**: once it's uploaded, `modulo add hf:you/repo --model M --as-index-entry` expands it into complete index entries for a PR. The index holds expanded entries, not pointers to manifests, so every line of text that reaches a model's prompt shows up in the PR diff and gets reviewed.
+- **Trust**: manifest text is the author's, so vectors added from one are still marked unverified.
 
 ## Strength units
 
@@ -186,7 +219,8 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 | `modulo/community.py` | Community vector index: entry format and file checks |
 | `modulo/cli.py` | The `modulo` command (search, list, add, extract, verify, run) |
 | `modulo/search.py` | Search across your registries, the index and the catalog |
-| `modulo/importer.py` | `modulo add`: inspect a HuggingFace repo's vector files and register them |
+| `modulo/importer.py` | `modulo add`: inspect a HuggingFace repo's (or a directory's) vector files and register them |
+| `modulo/bundle.py` | `modulo-bundle.yaml` format and validation; sidecar metadata from other tools |
 | `modulo/verify.py` | Strength sweeps shared by `modulo verify`, `verify_vector.py` and `gpu_verify.py` |
 | `community/vectors.yaml` | Community vector index (pointers to hosted vectors, with trust levels) |
 | `community/check_vectors.py` | Checks the index; run by CI on PRs touching `community/` |
@@ -207,7 +241,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 ```bash
 pytest                              # everything; GPU tests skip without CUDA
 pytest tests/test_agent_logic.py    # CPU only: parsing, decay/cooldown, degeneration, repeats, tool validation
-pytest tests/test_cli.py            # CPU only: search, `modulo add` against a fake hub, naming, layer picking
+pytest tests/test_cli.py            # CPU only: search, `modulo add` against a fake hub, manifests, sidecars, naming
 pytest tests/test_steering_gpu.py   # loads the model; checks steering really changes generation
 ```
 
