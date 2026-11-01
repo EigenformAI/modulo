@@ -34,3 +34,6 @@ Thumbs.db
 
 # `modulo verify` reports
 vectors/*/verify_*.md
+
+# Personal experiment scratch space
+scratchpad/
