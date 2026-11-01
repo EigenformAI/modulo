@@ -24,7 +24,7 @@ from typing import Optional
 
 import torch
 
-from modulo.chat import chat_prompt
+from modulo.chat import chat_prompt, encode
 from modulo.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
 from modulo.reports import make_report, new_session_id
 
@@ -46,10 +46,16 @@ REPEAT_NOTICE = json.dumps({
                "so it was discarded and this turn was regenerated.",
 })
 
-# Strength is expressed as a percentage of the typical residual-stream norm at
-# the vector's layer, so the same number means the same push for every vector
-# regardless of how it was extracted. This prompt is used to measure that norm.
+# Strength is measured against the typical residual-stream norm of generated
+# tokens at the vector's layer: strength FULL_TOKEN_STRENGTH adds a push as large
+# as that norm, so the same number means the same push for every vector and
+# every model. 15 keeps Qwen2.5-7B's strengths what they were under the old
+# definition (% of an inflated norm): within ~1%. Steered outputs break down
+# around 12-13 on both Qwen2.5-7B and Llama-3.1-8B.
+FULL_TOKEN_STRENGTH = 15.0
+# The norm is measured on an unsteered greedy reply to this prompt.
 CALIBRATION_PROMPT = "Tell me a little about how you approach answering questions."
+CALIBRATION_TOKENS = 48
 
 # Experimental conditions. Everything the model sees (tool results, status,
 # decay, degeneration handling) is identical across them; only what is added
@@ -165,8 +171,8 @@ def is_degenerate(text: str) -> bool:
     text = text.strip()
     if len(text) < 20:
         return False
-    # Same word 6+ times in a row
-    if re.search(r'(\b\w+\b)( \1){5,}', text):
+    # Same word 6+ times in a row, separated by spaces or hyphens ("sau-sau-sau-...")
+    if re.search(r'(\b\w+\b)([ -]\1\b){5,}', text):
         return True
     # Same character 16+ times in a row
     if re.search(r'(.)\1{15,}', text):
@@ -285,9 +291,9 @@ You can call steer by emitting a JSON object on its own line, like this:
 
 Parameters:
 - concept: one of the available steering vectors (listed below)
-- strength: a number; positive or negative. It is the size of the push as a \
-percentage of the typical size of your activations at that layer, so 5.0 adds \
-a vector 5% as large as your activations. Clamped to each vector's range.
+- strength: a number; positive or negative. It is the size of the push: \
+{full_strength:g} adds a vector as large as your typical activations at that \
+layer, so 5.0 adds one {five_pct:.0f}% as large. Clamped to each vector's range.
 
 # How it works
 
@@ -406,6 +412,8 @@ class SteeringAgent:
             decay=DECAY_FACTOR,
             ten_after_10=10 * DECAY_FACTOR ** 9,
             floor=STRENGTH_FLOOR,
+            full_strength=FULL_TOKEN_STRENGTH,
+            five_pct=500 / FULL_TOKEN_STRENGTH,
             max_active=MAX_ACTIVE_VECTORS,
             cooldown=COOLDOWN_TURNS,
             vector_descriptions=self.registry.describe_for_prompt(
@@ -478,10 +486,19 @@ class SteeringAgent:
         return self._unit_vectors[entry.name]
 
     def residual_norm(self, layer: int) -> float:
-        """Typical residual-stream norm at a decoder layer's output (cached)."""
+        """Typical residual-stream norm of generated tokens at a decoder layer's output (cached).
+
+        The median over an unsteered greedy reply to CALIBRATION_PROMPT. Prompt
+        positions are avoided: chat templates contain attention-sink tokens with
+        norms hundreds of times the usual (14,000 against ~70 on Qwen2.5-7B), and
+        a mean over them overstated the norm by a different factor per model
+        (6.4x on Qwen2.5-7B, 1.7x on Llama-3.1-8B).
+        """
         if layer not in self._residual_norms:
             text = chat_prompt(self.tokenizer, [{"role": "user", "content": CALIBRATION_PROMPT}])
-            inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+            inputs = encode(self.tokenizer, text, self.model.device)
+            prompt_len = inputs.input_ids.shape[1]
+            out = self._generate_ids(inputs, CALIBRATION_TOKENS, temperature=0, top_p=1.0)
             captured = {}
 
             def hook(module, inp, output):
@@ -491,11 +508,13 @@ class SteeringAgent:
             handle = self.model.model.layers[layer].register_forward_hook(hook)
             try:
                 with torch.inference_mode():
-                    self.model(**inputs)
+                    self.model(out)
             finally:
                 handle.remove()
-            # Skip position 0: the first token's residual norm is an outlier (attention sink).
-            self._residual_norms[layer] = captured["h"][1:].norm(dim=-1).mean().item()
+            h = captured["h"][prompt_len:]
+            if len(h) == 0:  # no reply at all: fall back to the prompt, skipping its first token
+                h = captured["h"][1:]
+            self._residual_norms[layer] = h.norm(dim=-1).median().item()
         return self._residual_norms[layer]
 
     def _build_steering_context(self, prompt_len: int):
@@ -504,7 +523,7 @@ class SteeringAgent:
         layer_vectors = {}
         for av in self.active.values():
             layer = av.entry.layer
-            scale = av.current_strength / 100.0 * self.residual_norm(layer)
+            scale = av.current_strength / FULL_TOKEN_STRENGTH * self.residual_norm(layer)
             vec = self._unit_vector(av.entry) * scale
             layer_vectors[layer] = layer_vectors.get(layer, 0) + vec
         # Start at the last prompt position: its output predicts the first new
@@ -583,7 +602,7 @@ class SteeringAgent:
 
     def _encode(self, messages: list[dict]):
         text = chat_prompt(self.tokenizer, self._full_messages(messages))
-        return self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        return encode(self.tokenizer, text, self.model.device)
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
              temperature: float = 0.7, top_p: float = 0.9) -> StepResult:

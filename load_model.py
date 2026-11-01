@@ -4,7 +4,7 @@ import config  # sets HF_HOME; must come before transformers is imported
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from modulo.chat import chat_prompt
+from modulo.chat import chat_prompt, encode
 
 
 def load_model_and_tokenizer(model_name=None):
@@ -27,7 +27,7 @@ def sanity_check(model, tokenizer):
     prompt = "In one sentence, what is a steering vector?"
     messages = [{"role": "user", "content": prompt}]
     text = chat_prompt(tokenizer, messages)
-    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    inputs = encode(tokenizer, text, model.device)
     with torch.inference_mode():
         out = model.generate(**inputs, max_new_tokens=80, do_sample=False)
     gen = out[0][inputs.input_ids.shape[1]:]

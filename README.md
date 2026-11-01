@@ -59,7 +59,7 @@ GPU with 24GB+ VRAM (7B models) or 8GB+ (3B models). Python 3.10+, CUDA 12.x. Se
 
 ## Safety rails
 
-Per-turn decay (0.85×), max 4 active vectors, strength clamping (strength = % of residual-stream norm, max 15), cooldown on dropped vectors, degeneration detector, cross-turn repeat detector, kill switch.
+Per-turn decay (0.85×), max 4 active vectors, strength clamping (max strength 15 = a push as large as a typical token's residual-stream norm), cooldown on dropped vectors, degeneration detector, cross-turn repeat detector, kill switch.
 
 ## License
 

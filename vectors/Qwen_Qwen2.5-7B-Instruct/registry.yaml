@@ -7,10 +7,10 @@
 # assistant_axis, are added at startup and aren't listed here. A vector listed
 # here with the same name as an index vector replaces it.
 #
-# Strength units: percent of the typical residual-stream norm at `layer`
-# (vectors are normalized to unit length before scaling), so the same strength
-# is the same size push for every vector. Hard cap: MAX_STRENGTH in
-# modulo/agent.py.
+# Strength units: 15 is a push as large as a typical generated token's
+# residual-stream norm at `layer` (vectors are normalized to unit length before
+# scaling), so the same strength is the same size push for every vector and
+# model. Hard cap: MAX_STRENGTH in modulo/agent.py.
 #
 # Format:
 #   name:           short identifier the agent uses in steer() calls

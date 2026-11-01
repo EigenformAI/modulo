@@ -61,7 +61,7 @@ ENTRY_FIELDS = {
     "license": ((str,), True),
     "contributors": ((list,), True),       # names/handles to credit
     "trust": ((str,), True),               # community | verified (maintainers only)
-    # Modulo units (% of residual norm). Set by a maintainer after GPU verification.
+    # Modulo units (15 = a typical token's residual norm). Set by a maintainer after GPU verification.
     "safe_strength_min": ((int, float), False),
     "safe_strength_max": ((int, float), False),
     # Optional context from the contributor, in their own units/setup
