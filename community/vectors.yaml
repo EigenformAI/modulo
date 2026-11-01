@@ -3,7 +3,7 @@
 # Each entry points at a vector file hosted elsewhere (usually the contributor's
 # own HuggingFace repo), pinned by sha256. New entries use trust: community.
 # Only maintainers set trust: verified and the safe strength range, which is in
-# Modulo units (% of the residual-stream norm at the layer), after GPU verification.
+# Modulo units (15 = a push as large as a typical token's residual norm), after GPU verification.
 entries:
   - id: qwen2.5-7b-instruct-assistant-axis
     name: assistant_axis

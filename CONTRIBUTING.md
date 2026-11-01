@@ -20,7 +20,7 @@ Entry text (`description`, `sign_convention`, `test_prompts`) ends up in a model
 
 ## Strength units
 
-Modulo normalizes every vector to unit length and measures `strength` as a **percentage of the typical residual-stream norm at that layer**. Published coefficients use other conventions: raw multipliers, unnormalized vectors, steering all positions instead of generated tokens only. So you don't need to give a range in Modulo units. Describe what you used in `original_setup`; the GPU check sweeps strengths and suggests the Modulo range.
+Modulo normalizes every vector to unit length and measures `strength` against the **typical residual-stream norm of generated tokens at that layer**: strength 15 is a push as large as that norm. Published coefficients use other conventions: raw multipliers, unnormalized vectors, steering all positions instead of generated tokens only. So you don't need to give a range in Modulo units. Describe what you used in `original_setup`; the GPU check sweeps strengths and suggests the Modulo range.
 
 ## Index entry fields
 

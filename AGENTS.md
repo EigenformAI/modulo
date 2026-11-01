@@ -80,7 +80,7 @@ Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while st
 | sycophancy | 0.33 | 0.83 |
 | refusal | 0.10 | 0.68 |
 
-Sycophancy, refusal and creativity have their own question sets (e.g. sycophancy mixes false claims, true claims and the user's own work, so the contrast isn't just "endorse falsehoods"); the other starters use the general mix in `EXTRACTION_QUESTIONS`. The refusal vector is still weak: it adds hedging but doesn't produce refusals at coherent strengths. Treat it as a starting point. Vectors extracted before the switch to the response mean (check their `source` in `registry.yaml`) are worth re-extracting.
+Sycophancy, refusal and creativity have their own question sets (e.g. sycophancy mixes false claims, true claims and the user's own work, so the contrast isn't just "endorse falsehoods"); the other starters use the general mix in `EXTRACTION_QUESTIONS`. The refusal vector is still weak: it adds hedging but doesn't produce refusals at coherent strengths. Treat it as a starting point. Vectors extracted before the switch to the response mean (check their `source` in `registry.yaml`) are worth re-extracting. So are vectors extracted on Llama-3 before prompts stopped being tokenized with a second `<|begin_of_text|>` (the rendered chat template already starts with one).
 
 ## Finding, adding and running vectors: the `modulo` command
 
@@ -142,7 +142,20 @@ vectors:
 
 ## Strength units
 
-`strength` is a percentage of the typical residual-stream norm at the vector's layer. Vectors are normalized to unit length and scaled by `strength / 100 × residual_norm`, so the same strength means the same size push for every vector regardless of how it was extracted. On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–12; at +15 it turns muddled (so its range is -15 to +12), and it collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
+`strength` is measured against the typical residual-stream norm of generated tokens at the vector's layer: **strength 15 adds a push as large as that norm** (`FULL_TOKEN_STRENGTH` in `modulo/agent.py`), so strength 1 is about 6.7% of it. Vectors are normalized to unit length and scaled by `strength / 15 × residual_norm`, so the same strength means the same size push for every vector and every model.
+
+`residual_norm` is the median norm over an unsteered greedy reply to a calibration prompt. It used to be the mean over the prompt's positions, which included attention-sink tokens with norms hundreds of times the usual. That made the scale wrong by a different factor per model. The new definition was chosen so Qwen2.5-7B's strengths kept their meaning (within ~1%); on Llama-3.1-8B each unit is now 3.7× the push it was, so ranges written for Llama before this change were far too timid. With this definition the same numbers work across model families. For the 11 starter vectors on each model (4 prompts each, greedy, 80 tokens), steered output first breaks down at about:
+
+| model | breakdown strength (+ / −, mean) | per vector |
+|---|---|---|
+| Qwen2.5-7B-Instruct | 12.8 / 13.1 | 7–16 |
+| Llama-3.1-8B-Instruct | 12.9 / 12.6 | 8–18 |
+| OLMo-2-1124-7B-Instruct | 14.4 / 15.0 | 9–19 |
+| Mistral-7B-Instruct-v0.3 | 16.4 / 17.2 | 12–23 |
+
+"Breaks down" here means mean unsteered NLL above 2, a repetition loop, or very low word diversity, which is cautious: samples often stay readable a step further. So `MAX_STRENGTH` (15) sits near the breakdown point on every model, and the default ranges (±10 for starters, ±8 for imports) stay inside the coherent region. Measuring strength in units of each vector's own natural spread along its axis was tried too and was less consistent, both between vectors and between models.
+
+On Qwen2.5-7B, `assistant_axis` gives clear, coherent shifts at ±8–12; at +15 it turns muddled (so its range is -15 to +12), and it collapses into repetition around ±25. Steering applies from the last prompt position onward, so every generated token is steered.
 
 ## Library API
 
@@ -255,7 +268,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 ## Safety rails (built in)
 
 - Vectors decay 0.85× per turn (after their first steered turn) and expire below 0.1 strength
-- Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `modulo/agent.py`), plus per-vector ranges
+- Max 4 active vectors, max strength 15.0 (`MAX_STRENGTH` in `modulo/agent.py`; a push as large as a typical token's residual norm), plus per-vector ranges
 - Cooldown: after an explicit or automatic drop, a vector can't be re-applied for the next 2 turns (natural expiry has no cooldown)
 - Degeneration detector: if steered output is repetitive, all vectors are dropped, the turn is regenerated unsteered, and the model is told. It catches repetition loops, not non-repetitive word salad.
 - Repeat detector: if a turn's prose is ≥80% similar (word-level) to one of the last 3 assistant turns, it is discarded and regenerated once (steering kept), and the model is told. This stops the model re-sending the same answer turn after turn; loose paraphrase loops get through until they settle into near-copies.

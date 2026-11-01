@@ -15,6 +15,7 @@ if not torch.cuda.is_available():
 import config  # sets HF_HOME before transformers is imported
 from load_model import load_model_and_tokenizer
 from modulo import SteeringAgent
+from modulo.chat import chat_prompt, encode
 
 VECTOR = "assistant_axis"
 STRENGTH = 12.0
@@ -35,9 +36,7 @@ def agent():
 
 def _inputs(agent, prompt=PROMPT):
     tok = agent.tokenizer
-    text = tok.apply_chat_template([{"role": "user", "content": prompt}],
-                                   tokenize=False, add_generation_prompt=True)
-    return tok([text], return_tensors="pt").to(agent.model.device)
+    return encode(tok, chat_prompt(tok, [{"role": "user", "content": prompt}]), agent.model.device)
 
 
 def _greedy(agent, strength, max_new_tokens=40):
@@ -122,3 +121,33 @@ def test_unsteered_nll_logged_on_steered_turns_only(agent):
     agent.apply(VECTOR, 8.0)
     r = agent.step(msgs, max_new_tokens=10, temperature=0)
     assert r.unsteered_nll is not None and r.unsteered_nll > 0
+
+
+def test_residual_norm_matches_generated_tokens(agent):
+    """The strength scale comes from ordinary generated tokens, not attention sinks.
+
+    A mean over prompt positions once included a sink token with a norm ~200x the
+    usual and made every strength ~6x larger than documented.
+    """
+    layer = agent.registry.get(VECTOR).layer
+    inputs = _inputs(agent, "Describe a rainy Monday morning.")
+    n = inputs.input_ids.shape[1]
+    out = agent._generate_ids(inputs, 40, temperature=0, top_p=1.0)
+    captured = {}
+    handle = agent.model.model.layers[layer].register_forward_hook(
+        lambda m, i, o: captured.__setitem__("h", (o[0] if isinstance(o, tuple) else o)[0].float()))
+    try:
+        with torch.inference_mode():
+            agent.model(out)
+    finally:
+        handle.remove()
+    typical = captured["h"][n:].norm(dim=-1).median().item()
+    assert 0.7 < agent.residual_norm(layer) / typical < 1.4
+
+
+def test_prompt_has_one_bos_token(agent):
+    tok = agent.tokenizer
+    if tok.bos_token_id is None:
+        pytest.skip("tokenizer has no BOS token")
+    ids = _inputs(agent).input_ids[0].tolist()
+    assert ids.count(tok.bos_token_id) <= 1

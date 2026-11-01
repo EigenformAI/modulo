@@ -1,7 +1,7 @@
 """Run a community vector on its model and summarise what it does, so a
 maintainer can decide whether to promote it to "verified".
 
-Sweeps strengths in Modulo units (% of the residual norm) on the entry's
+Sweeps strengths in Modulo units (15 = a typical token's residual norm) on the entry's
 test_prompts plus a few generic ones, flags where output degenerates, and
 suggests a safe strength range. Writes Markdown; --pr posts it on a PR with gh.
 

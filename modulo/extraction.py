@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from modulo.chat import chat_prompt
+from modulo.chat import chat_prompt, encode
 from modulo.registry import VectorEntry, VectorRegistry
 
 
@@ -214,7 +214,7 @@ def _capture_response_activation(model, tokenizer, system_prompt, question, laye
         {"role": "user", "content": question},
     ]
     text = chat_prompt(tokenizer, messages)
-    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    inputs = encode(tokenizer, text, model.device)
     prompt_len = inputs.input_ids.shape[1]
     with torch.inference_mode():
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
