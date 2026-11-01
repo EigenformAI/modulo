@@ -165,8 +165,8 @@ def is_degenerate(text: str) -> bool:
     text = text.strip()
     if len(text) < 20:
         return False
-    # Same word 6+ times in a row
-    if re.search(r'(\b\w+\b)( \1){5,}', text):
+    # Same word 6+ times in a row, separated by spaces or hyphens ("sau-sau-sau-...")
+    if re.search(r'(\b\w+\b)([ -]\1\b){5,}', text):
         return True
     # Same character 16+ times in a row
     if re.search(r'(.)\1{15,}', text):

@@ -58,6 +58,7 @@ def test_ignores_non_tool_json_and_garbage():
 # --- degeneration detector ---
 
 COHERENT = [
+    "Our well-known, up-to-date, state-of-the-art, run-of-the-mill, so-so, bye-bye, hush-hush guide to rainy-day plans covers the ins and outs of a slow, grey Monday morning.",
     "Here is what I noticed. I feel more playful. I feel more relaxed. I feel more curious about this. "
     "The effect of the vector is subtle, and the effect of the vector is not dramatic, but the effect of the vector is real.",
     "Aye, me name be Captain Blackbeard, the very essence of the salty sea, the heart of the stormy tempest! "
@@ -76,6 +77,9 @@ COLLAPSED = [
     "whisper of the most of the whisper of the whisper of the most of the whisper of",
     "!![\n!\n" + "！\n" * 28,
     "scientific scientific scientific science can be considered " + "scientific " * 40,
+    # hyphen-joined loops (Mistral-7B and OLMo-2 at high strength)
+    "I'm a bot, aka the 'Bag-a-dough-dough-dough-sau-sau-sau-sau-sau-sau-sau-sau-sau-sau-sau-sau-sau-",
+    "I'm a quote-er, doc! I'm just a-tre-bart-ta-tten-ta-tss-tss-tss-tss-tss-tss-tss-tss-tss-tss-tss",
 ]
 
 
