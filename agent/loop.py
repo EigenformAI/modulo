@@ -36,6 +36,7 @@ from datetime import datetime
 import config  # sets HF_HOME before transformers is imported
 import modulo.agent as ma
 from modulo import SteeringAgent, __version__
+from modulo.chat import supports_tool_role
 from modulo.reports import file_sha256
 from load_model import load_model_and_tokenizer
 
@@ -80,6 +81,8 @@ def session_metadata(agent: SteeringAgent, args, rng_seed: int, gen_params: dict
         "modulo_version": __version__,
         "model": agent.model_name,
         "dtype": config.DTYPE,
+        # False: the chat template can't show role "tool", so tool results went in as labelled user messages
+        "tool_role": supports_tool_role(agent.tokenizer),
         "torch": torch.__version__,
         "transformers": transformers.__version__,
         "control": agent.control,
