@@ -25,7 +25,15 @@ The agent harness calls `agent.step(messages)` each turn instead of `model.gener
 
 `agent.apply()` / `agent.drop()` called between steps behave like the model's own tool calls: an applied vector gets one full-strength steered turn, and a drop blocks re-applying for `COOLDOWN_TURNS` turns.
 
-Chat templates must accept `system` and `tool` roles (Qwen, Llama-3.x, recent Mistral do). Gemma-2 rejects both, so it isn't supported yet.
+Chat templates must accept a `system` role. Tool results are sent as role `tool`. If a model's template can't show that role, they're sent instead as user messages starting with `[Tool result]`, with consecutive user messages merged. Modulo checks this once per tokenizer (`modulo.chat.supports_tool_role`), and session logs record it as `tool_role`.
+
+| model | role `tool` | notes |
+|---|---|---|
+| Qwen2.5 | shown | |
+| Llama-3.1 | shown | |
+| OLMo-2 | fallback | its template silently drops `tool` messages |
+| Mistral-7B-Instruct-v0.3 | fallback | its template requires tool-call IDs and strictly alternating turns, and puts the system prompt in the latest user message. Its tokenizer needs `sentencepiece` and `protobuf`. |
+| Gemma-2 | — | rejects the `system` role, so it isn't supported yet |
 
 ### 2. As a standalone demo
 
@@ -282,6 +290,7 @@ Host the vector on HuggingFace and add an entry to `community/vectors.yaml` (or 
 | `run.sh` | Start a standalone demo session |
 | `modulo/__init__.py` | Public API exports |
 | `modulo/agent.py` | `SteeringAgent` class (core) |
+| `modulo/chat.py` | Prompt rendering: chat template, thinking mode off, tool-role fallback, tokenizing without a second BOS |
 | `modulo/registry.py` | `VectorRegistry`: your own vectors plus the community index for a model |
 | `modulo/extraction.py` | Vector extraction (manual + auto), per-vector question sets |
 | `modulo/reports.py` | Report format, validation, `reports.jsonl` read/write |
