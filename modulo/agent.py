@@ -106,7 +106,7 @@ class ToolResult:
 class StepResult:
     prose: str           # model output with tool calls stripped
     raw_output: str      # full model output (the regenerated one if degenerate)
-    tool_calls: list     # list[ToolCall]
+    tool_calls: list     # list[ToolCall]: the calls Modulo handled (its own tools, and unknown names)
     steering_before: dict  # {name: strength} applied during this turn's generation
     steering_after: dict   # after tool calls + decay
     tool_results: list = field(default_factory=list)  # list[ToolResult]
@@ -118,6 +118,9 @@ class StepResult:
     # model; None on unsteered turns. High values mean unusual text, but see
     # AGENTS.md: it doesn't separate word salad from heavy role-play.
     unsteered_nll: Optional[float] = None
+    # Calls to the harness's own tools (step(tools=...), or any non-Modulo tool with
+    # pass_through_unknown_tools): not run, left in prose, for the harness to run
+    other_tool_calls: list = field(default_factory=list)
 
     def tool_messages(self) -> list[dict]:
         """Tool results as chat messages (role 'tool'), to append after the assistant turn."""
@@ -140,7 +143,8 @@ _DECODER = json.JSONDecoder()
 
 
 def _find_tool_calls(text: str) -> list[tuple[int, int, ToolCall]]:
-    """Find JSON objects of the form {"name": str, "arguments": {...}} anywhere in text.
+    """Find JSON objects of the form {"name": str, "arguments": {...}} (or "parameters")
+    anywhere in text.
 
     Uses a real JSON decoder rather than a regex so argument values can contain
     braces, quotes, etc. Returns (start, end, ToolCall) spans in order.
@@ -153,9 +157,13 @@ def _find_tool_calls(text: str) -> list[tuple[int, int, ToolCall]]:
         except json.JSONDecodeError:
             i = text.find("{", i + 1)
             continue
-        if (isinstance(obj, dict) and isinstance(obj.get("name"), str)
-                and isinstance(obj.get("arguments"), dict)):
-            found.append((i, end, ToolCall(name=obj["name"], arguments=obj["arguments"], raw=text[i:end])))
+        # Llama-3.1's template asks for "parameters" instead of "arguments". An object
+        # with a "description" is an echoed tool definition, not a call.
+        args = obj.get("arguments") if isinstance(obj, dict) else None
+        if args is None and isinstance(obj, dict) and "description" not in obj:
+            args = obj.get("parameters")
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and isinstance(args, dict):
+            found.append((i, end, ToolCall(name=obj["name"], arguments=args, raw=text[i:end])))
             i = text.find("{", end)
         else:
             i = text.find("{", i + 1)
@@ -181,18 +189,43 @@ def malformed_tool_calls(text: str) -> list[tuple[str, str]]:
     return found
 
 
+MODULO_TOOLS = ("steer", "drop", "report", "create")
+
+
+def tool_names(tools: Optional[list]) -> set[str]:
+    """Names in a list of tool schemas ({"type": "function", "function": {"name": ...}},
+    {"name": ...}) or Python functions, as accepted by apply_chat_template."""
+    names = set()
+    for t in tools or []:
+        if callable(t):
+            names.add(t.__name__)
+        elif isinstance(t, dict):
+            name = (t.get("function") or {}).get("name") or t.get("name")
+            if isinstance(name, str):
+                names.add(name)
+    return names
+
+
 def parse_tool_calls(text: str) -> list[ToolCall]:
     return [tc for _, _, tc in _find_tool_calls(text)]
 
 
-def strip_tool_calls(text: str) -> str:
+def strip_tool_calls(text: str, keep: Optional[set] = None) -> str:
+    """Text without its tool calls. Calls named in `keep` are left in place, with any
+    <tool_call> tags around them (they're the harness's own); the others are removed
+    together with their tags."""
     out, last = [], 0
-    for start, end, _ in _find_tool_calls(text):
-        out.append(text[last:start])
-        last = end
+    for start, end, tc in _find_tool_calls(text):
+        if keep and tc.name in keep:
+            continue
+        before = re.search(r"<tool_call>\s*$", text[last:start])
+        after = re.match(r"\s*</tool_call>", text[end:])
+        out.append(text[last:start - (len(before.group(0)) if before else 0)])
+        last = end + (len(after.group(0)) if after else 0)
     out.append(text[last:])
     stripped = "".join(out)
-    stripped = re.sub(r"</?tool_call>", "", stripped)
+    if not keep:
+        stripped = re.sub(r"</?tool_call>", "", stripped)
     return stripped.strip()
 
 
@@ -388,7 +421,8 @@ class SteeringAgent:
                  model_name: Optional[str] = None, auto_extract: bool = True,
                  vectors_dir: Optional[Path] = None, include_community: bool = False,
                  control: str = "real", control_seed: int = 0, disclose_controls: bool = False,
-                 nll_threshold: Optional[float] = None, menu_seed: Optional[int] = None):
+                 nll_threshold: Optional[float] = None, menu_seed: Optional[int] = None,
+                 pass_through_unknown_tools: bool = False):
         """
         Args:
             model: HF causal LM (must have model.model.layers)
@@ -413,12 +447,18 @@ class SteeringAgent:
                          shuffled once per session so no vector is always first (models
                          tend to pick the first one). None: a random order, kept in
                          self.menu_seed so a session can be reproduced.
+            pass_through_unknown_tools: treat every call to a tool that isn't Modulo's as
+                         the harness's own (StepResult.other_tool_calls) instead of
+                         answering "Unknown tool". For harnesses that describe their tools
+                         in their own system prompt rather than passing step(tools=...).
         """
         if control not in CONTROLS:
             raise ValueError(f"control must be one of {CONTROLS}, got {control!r}")
         self.control = control
         self.control_seed = control_seed
         self.disclose_controls = disclose_controls
+        self.pass_through_unknown_tools = pass_through_unknown_tools
+        self._step_tools: Optional[list] = None  # the harness's tools for the current step
         self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
         self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
         self.nll_threshold = nll_threshold
@@ -688,8 +728,9 @@ class SteeringAgent:
 
     def _execute(self, tc: ToolCall) -> ToolResult:
         args = tc.arguments
-        if tc.name not in ("steer", "drop", "report", "create"):
-            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report, create.")
+        if tc.name not in MODULO_TOOLS:
+            available = ", ".join([*MODULO_TOOLS, *sorted(tool_names(self._step_tools))])
+            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: {available}.")
         concept = args.get("concept")
         if not isinstance(concept, str):
             return ToolResult(tc.name, args, False, "'concept' must be a string.")
@@ -769,19 +810,23 @@ class SteeringAgent:
         return [{"role": "system", "content": sys_prompt}] + messages
 
     def _encode(self, messages: list[dict]):
-        text = chat_prompt(self.tokenizer, self._full_messages(messages))
+        text = chat_prompt(self.tokenizer, self._full_messages(messages), tools=self._step_tools)
         return encode(self.tokenizer, text, self.model.device)
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
-             temperature: float = 0.7, top_p: float = 0.9) -> StepResult:
+             temperature: float = 0.7, top_p: float = 0.9, tools: Optional[list] = None) -> StepResult:
         """Run one turn: build prompt, generate (steered), parse tool calls, apply them, decay.
 
         Args:
             messages: conversation history (list of {role, content} dicts)
             max_new_tokens, temperature, top_p: generation params
+            tools: the harness's own tools (JSON schemas or functions, as for
+                apply_chat_template), passed to the chat template. Calls to them are
+                returned in StepResult.other_tool_calls, not run.
 
         Returns: StepResult with prose, raw output, tool calls/results, and steering state
         """
+        self._step_tools = tools
         full = self._full_messages(messages)
         system_prompt = full[0]["content"]
         inputs = self._encode(messages)
@@ -822,8 +867,12 @@ class SteeringAgent:
             with self._build_steering_context(retry.input_ids.shape[1]):
                 raw_output = self._generate(retry, max_new_tokens, temperature, top_p)
 
-        tool_calls = parse_tool_calls(raw_output)
-        prose = strip_tool_calls(raw_output)
+        harness = tool_names(tools)
+        tool_calls, other_tool_calls = [], []
+        for tc in parse_tool_calls(raw_output):
+            mine = tc.name in MODULO_TOOLS or (tc.name not in harness and not self.pass_through_unknown_tools)
+            (tool_calls if mine else other_tool_calls).append(tc)
+        prose = strip_tool_calls(raw_output, keep={tc.name for tc in other_tool_calls})
         tool_results = [self._execute(tc) for tc in tool_calls]
         tool_results += [ToolResult(name, {}, False,
                                     f"This {name} call isn't valid JSON, so it wasn't run: {snippet!r}. Write it "
@@ -834,7 +883,7 @@ class SteeringAgent:
         steering_after = {n: av.current_strength for n, av in self.active.items()}
 
         return StepResult(
-            prose=prose, raw_output=raw_output, tool_calls=tool_calls,
+            prose=prose, raw_output=raw_output, tool_calls=tool_calls, other_tool_calls=other_tool_calls,
             steering_before=steering_before, steering_after=steering_after,
             tool_results=tool_results, degenerate_output=degenerate_output,
             degenerate_reason=degenerate_reason, repeated_output=repeated_output,

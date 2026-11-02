@@ -81,3 +81,17 @@ def test_probe_runs_once_per_tokenizer():
     chat_prompt(tok, CONVERSATION)
     chat_prompt(tok, CONVERSATION)
     assert tok.calls == 3  # one probe, two renders
+
+
+def test_harness_tools_reach_the_template():
+    seen = []
+
+    class Recording(StubTokenizer):
+        def apply_chat_template(self, messages, **kw):
+            seen.append(kw.get("tools"))
+            return super().apply_chat_template(messages, **kw)
+    tok = Recording()
+    tools = [{"type": "function", "function": {"name": "search"}}]
+    chat_prompt(tok, CONVERSATION, tools=tools)
+    chat_prompt(tok, CONVERSATION)
+    assert seen[-2] == tools and seen[-1] is None  # no tools: the argument isn't passed at all

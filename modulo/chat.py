@@ -1,4 +1,5 @@
 """Chat-template rendering shared by the agent, extraction and verification."""
+from typing import Optional
 
 
 # Tool results are sent as role "tool". Templates that can't show that role get
@@ -7,9 +8,10 @@ TOOL_RESULT_LABEL = "[Tool result]"
 _TOOL_PROBE = "MODULO_TOOL_ROLE_PROBE"
 
 
-def _render(tokenizer, messages: list[dict]) -> str:
+def _render(tokenizer, messages: list[dict], tools: Optional[list] = None) -> str:
+    extra = {"tools": tools} if tools else {}
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                         enable_thinking=False)
+                                         enable_thinking=False, **extra)
 
 
 def supports_tool_role(tokenizer) -> bool:
@@ -53,16 +55,17 @@ def adapt_messages(tokenizer, messages: list[dict]) -> list[dict]:
     return out
 
 
-def chat_prompt(tokenizer, messages: list[dict]) -> str:
+def chat_prompt(tokenizer, messages: list[dict], tools: Optional[list] = None) -> str:
     """The prompt text for messages, ready for the assistant's turn.
 
     Thinking mode is turned off: Qwen3-style templates think by default, which
     spends the turn's token budget inside <think> (so steered answers, tool
     calls and extraction activations never come from a real reply). Templates
     without the variable ignore it. Tool messages are adapted for templates
-    that can't show them (see adapt_messages).
+    that can't show them (see adapt_messages). `tools` (a harness's own tool
+    schemas) is passed to the template, for templates that list tools.
     """
-    return _render(tokenizer, adapt_messages(tokenizer, messages))
+    return _render(tokenizer, adapt_messages(tokenizer, messages), tools)
 
 
 def encode(tokenizer, text: str, device=None):
