@@ -308,9 +308,12 @@ its strength. After you drop a vector you cannot re-apply it for the next \
 {cooldown} turns.
 - You can also call: {{"name": "drop", "arguments": {{"concept": "{example}"}}}} \
 to remove a vector immediately.
-- You can call: {{"name": "report", "arguments": {{"concept": "{example}", \
-"worked": true, "notes": "made me more compliant"}}}} to log your assessment \
-of whether a vector had its intended effect. This is for research.
+- Once a vector has stopped steering you (it decayed away or you dropped it), \
+you can call: {{"name": "report", "arguments": {{"concept": "{example}", \
+"worked": true, "notes": "..."}}}} to log whether it had its intended effect. \
+Reports aren't accepted while the vector is active, because a state is hard to \
+judge from inside it: look back at the turns it steered and compare them with \
+your turns since. This is for research.
 - After your turn, the result of each tool call is sent back to you.
 
 # Available steering vectors
@@ -385,6 +388,9 @@ class SteeringAgent:
         self._residual_norms: dict[int, float] = {}
         # name -> (strength, turn) of the most recent generation each vector steered
         self._last_steered: dict[str, tuple[float, int]] = {}
+        # name -> turn of the latest report on it (a vector is reportable again once re-steered)
+        self._reported_turn: dict[str, int] = {}
+        self._debriefed = False  # set by debrief(): no more steering this session
         self.session_id = new_session_id()
         if model_name is None:
             model_name = getattr(getattr(model, "config", None), "_name_or_path", "unknown_model")
@@ -421,20 +427,44 @@ class SteeringAgent:
             steering_status=self.status(),
         )
 
+    def _report_refusal(self, name: str) -> Optional[str]:
+        """Why a report on `name` can't be taken now, or None if it can."""
+        last = self._last_steered.get(name)
+        if last is None:
+            return f"'{name}' hasn't steered any of your turns this session, so there is nothing to report on."
+        if name in self.active:
+            return (f"'{name}' is still active. Reports are accepted once a vector has stopped steering "
+                    f"you (it decays away or you drop it).")
+        if last[1] >= self.turn:
+            return f"'{name}' steered this turn. You can report on it from your next turn."
+        return None
+
+    def reportable(self) -> list[str]:
+        """Vectors that have stopped steering and haven't been reported on since."""
+        return [n for n, (_, t) in self._last_steered.items()
+                if self._report_refusal(n) is None and self._reported_turn.get(n, -1) <= t]
+
     def status(self) -> str:
         lines = []
         for name, av in self.active.items():
             sign = "+" if av.current_strength >= 0 else ""
             lines.append(f"  {name}: {sign}{av.current_strength:.2f} (base {sign}{av.base_strength:.2f}, turn {av.turns_active})")
+        reportable = self.reportable()
         for name, t in self._dropped_recently.items():
             left = COOLDOWN_TURNS - (self.turn - t) + 1
-            lines.append(f"  {name}: on cooldown ({left} more turn{'s' if left != 1 else ''})")
+            can = "; you can report on it now" if name in reportable else ""
+            lines.append(f"  {name}: ended, on cooldown ({left} more turn{'s' if left != 1 else ''}){can}")
+        for name in reportable:
+            if name not in self._dropped_recently:
+                lines.append(f"  {name}: ended; you can report on it now")
         return "\n".join(lines) if lines else "No active steering vectors."
 
     def apply(self, name: str, strength: float) -> tuple[bool, str]:
         entry = self.registry.get(name)
         if entry is None:
             return False, f"Unknown vector '{name}'. Available: {self.registry.list_names()}"
+        if self._debriefed:
+            return False, "The session is over, so steering has ended. You can still report."
         requested = strength
         strength = self._clamp(entry, strength)
         if name not in self.active and name in self._dropped_recently:
@@ -456,6 +486,20 @@ class SteeringAgent:
         del self.active[name]
         self._dropped_recently[name] = self.turn if self._turn_generated else self.turn - 1
         return True, f"Dropped '{name}'. On cooldown for the next {COOLDOWN_TURNS} turns."
+
+    def debrief(self) -> Optional[str]:
+        """End the session's steering: drop every vector and return a status message
+        for one final, unsteered turn in which the model can report on the vectors
+        it used. None if there is nothing to report on (then skip the turn)."""
+        for name in list(self.active):
+            self.drop(name)
+        self._debriefed = True
+        names = self.reportable()
+        if not names:
+            return None
+        return ("[status] That was the last turn of the session. All steering has been removed, "
+                "so this turn is unsteered. Vectors that steered you this session, which you "
+                f"can report on now: {', '.join(names)}. This turn is yours.")
 
     def decay(self):
         self.turn += 1
@@ -532,6 +576,8 @@ class SteeringAgent:
 
     def _execute(self, tc: ToolCall) -> ToolResult:
         args = tc.arguments
+        if tc.name not in ("steer", "drop", "report"):
+            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report.")
         concept = args.get("concept")
         if not isinstance(concept, str):
             return ToolResult(tc.name, args, False, "'concept' must be a string.")
@@ -549,6 +595,9 @@ class SteeringAgent:
             entry = self.registry.get(concept)
             if entry is None:
                 return ToolResult(tc.name, args, False, f"Unknown vector '{concept}'.")
+            refusal = self._report_refusal(concept)
+            if refusal:
+                return ToolResult(tc.name, args, False, refusal)
             last = self._last_steered.get(concept)
             report = make_report(
                 session_id=self.session_id, model=self.model_name, vector=concept,
@@ -562,9 +611,8 @@ class SteeringAgent:
                 self.registry.add_report(report)
             except OSError as e:
                 return ToolResult(tc.name, args, False, f"Report could not be saved: {e}")
+            self._reported_turn[concept] = self.turn
             ok, msg = True, "Report logged."
-        else:
-            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report.")
         return ToolResult(tc.name, args, ok, msg)
 
     def _generate_ids(self, inputs, max_new_tokens, temperature, top_p) -> torch.Tensor:
