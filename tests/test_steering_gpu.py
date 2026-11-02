@@ -97,7 +97,8 @@ def test_steer_tool_call_takes_effect_next_turn(agent):
 
 def _greedy_with(control, strength, max_new_tokens=40):
     a = SteeringAgent(_MODEL["model"], _MODEL["tokenizer"], registry=_MODEL["agent"].registry,
-                      model_name=config.MODEL_NAME, control=control, control_seed=1)
+                      model_name=config.MODEL_NAME, control=control, control_seed=1,
+                      menu_seed=_MODEL["agent"].menu_seed)  # same prompt as the fixture agent
     if strength:
         assert a.apply(VECTOR, strength)[0]
     inputs = _inputs(a)

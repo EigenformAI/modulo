@@ -506,7 +506,7 @@ def test_random_control_direction_is_unit_deterministic_and_unrelated(real_vecto
 
 
 def test_system_prompt_identical_across_controls_when_disclosed():
-    prompts = {c: SteeringAgent(None, None, registry=StubRegistry(), control=c,
+    prompts = {c: SteeringAgent(None, None, registry=StubRegistry(), control=c, menu_seed=7,
                                 disclose_controls=True).build_system_prompt() for c in A.CONTROLS}
     assert len(set(prompts.values())) == 1
     assert "experimental controls" in prompts["real"]
@@ -666,3 +666,57 @@ def test_no_creating_after_the_debrief(creator):
     creator.debrief()
     r = creator._execute(ToolCall("create", {"concept": "late", "more": "x", "less": "y"}, ""))
     assert not r.ok and "session is over" in r.message and not creator._calls
+
+
+# --- the prompt's examples don't suggest values ---
+
+def test_prompt_examples_use_placeholders_not_values(agent):
+    prompt = agent.build_system_prompt()
+    assert '"concept": "<name>", "strength": <number>' in prompt
+    assert '"worked": <true or false>' in prompt
+    assert '"concept": "a"' not in prompt and '"strength": 5' not in prompt and "5.0" not in prompt
+    assert "1 adds one about 7% as large" in prompt and "about 23% of a vector's strength" in prompt
+
+
+def test_copied_placeholders_get_feedback_instead_of_silence(agent, monkeypatch):
+    out = _steered_step(agent, monkeypatch, 'Trying: {"name": "steer", "arguments": {"concept": "a", "strength": <number>}} '
+                                            'and {"name": "drop", "arguments": {"concept": "b"}}')
+    by_name = {r.name: r for r in out.tool_results}
+    assert not by_name["drop"].ok  # the valid call still ran ('b' isn't active)
+    assert not by_name["steer"].ok and "isn't valid JSON" in by_name["steer"].message
+    assert "<number>" in by_name["steer"].message and agent.active == {}
+    assert len(out.tool_results) == 2
+    msgs = out.tool_messages()
+    assert any("isn't valid JSON" in m["content"] for m in msgs)
+
+
+def test_echoed_tool_results_are_not_reported_as_malformed_calls():
+    from modulo.agent import malformed_tool_calls
+    echo = '{"name": "steer", "ok": true, "message": "steer(a, +5.00) applied"}'
+    assert malformed_tool_calls(echo) == []
+    assert [n for n, _ in malformed_tool_calls('{"name": "report", "arguments": {"worked": <true or false>}}')] == ["report"]
+
+
+# --- the menu order is shuffled per session ---
+
+def _menu(agent):
+    prompt = agent.build_system_prompt()
+    menu = prompt.split("# Available steering vectors")[1].split("# Important notes")[0]
+    return [line[2:].split(":")[0] for line in menu.strip().splitlines()]
+
+
+def test_menu_order_is_shuffled_per_session_and_seeded():
+    names = [f"v{i}" for i in range(8)]
+
+    def order(seed):
+        return _menu(SteeringAgent(None, None, registry=StubRegistry(names=names), menu_seed=seed))
+    assert order(1) == order(1) and sorted(order(1)) == names
+    assert len({tuple(order(s)) for s in range(6)}) > 1  # different sessions see different orders
+    a = SteeringAgent(None, None, registry=StubRegistry(names=names))
+    assert isinstance(a.menu_seed, int) and _menu(a) == _menu(a)  # stable within a session
+
+
+def test_vectors_created_mid_session_join_the_end_of_the_menu(creator):
+    before = _menu(creator)
+    creator._execute(ToolCall("create", {"concept": "wonder", "more": "x", "less": "y"}, ""))
+    assert _menu(creator) == before + ["wonder"]

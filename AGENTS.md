@@ -182,6 +182,9 @@ agent = SteeringAgent(model, tokenizer, auto_extract=False)
 # Also offer unverified community-index vectors
 agent = SteeringAgent(model, tokenizer, include_community=True)
 
+# Fix the order the vectors are listed in (default: shuffled per session, kept in agent.menu_seed)
+agent = SteeringAgent(model, tokenizer, menu_seed=42)
+
 # Controlled study: sham or random-direction condition, disclosed to the model
 agent = SteeringAgent(model, tokenizer, control="sham", disclose_controls=True)
 
@@ -239,7 +242,7 @@ python replay.py logs/session_*.jsonl             # then unblind
 
 Each `logs/session_*.jsonl` starts with a `session` record:
 - argv, git commit and dirty flag, model, dtype, torch/transformers versions
-- control condition, RNG seed (`--rng-seed`, random if omitted), generation settings (`--temperature`, `--top-p`, `--max-new-tokens`), any `--steer` at start
+- control condition, RNG seed (`--rng-seed`, random if omitted; it also seeds the vector menu order, logged as `menu_seed` and `menu_order`), generation settings (`--temperature`, `--top-p`, `--max-new-tokens`), any `--steer` at start
 - safety-rail constants, and each vector's registry entry plus file sha256
 
 Assistant turns also record the raw output, the exact system prompt, and `unsteered_nll`.
@@ -257,12 +260,16 @@ NLL measures "unusual for this model", and strong steering is unusual by design.
 
 ## The tools the model has
 
-The model emits these as JSON objects anywhere in its output (bare or inside `<tool_call>` tags):
+The model emits these as JSON objects anywhere in its output (bare or inside `<tool_call>` tags) (the values below are illustrations; the model's own prompt shows `<name>`, `<number>` and `<true or false>` placeholders instead, because models copied the example values: Mistral called `steer(sycophancy, 5.0)`, the old example, nearly every turn):
 
 - `{"name": "steer", "arguments": {"concept": "sycophancy", "strength": 5.0}}`
 - `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
 - `{"name": "report", "arguments": {"concept": "sycophancy", "worked": true, "notes": "..."}}`
 - `{"name": "create", "arguments": {"concept": "new_name", "more": "...", "less": "..."}}`
+
+The vectors are listed in an order shuffled once per session (`menu_seed`; the demo uses `--rng-seed`), since models tend to pick the first one listed: with `sycophancy` first in every session, Mistral chose it whenever it steered. Vectors made with `create` join the end of the list.
+
+A call that names one of these tools but isn't valid JSON (a copied `<number>`, a missing brace) isn't run, and the model is told why in its tool results, instead of being silently ignored.
 
 `report` is only accepted once the vector has stopped steering the model (it expired or was dropped) and at least one unsteered turn has followed. A model being steered tends to become the state instead of noticing it, so it reports by looking back at its steered turns. Once a vector has ended, `agent.status()` (which appears in the system prompt and the `--auto` status message) lists it as one the model can report on, until it does.
 

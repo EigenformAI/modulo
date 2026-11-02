@@ -129,11 +129,13 @@ class VectorRegistry:
     def vector_sha256(self, entry: VectorEntry) -> Optional[str]:
         return file_sha256(Path(self.vectors_dir) / entry.file)
 
-    def describe_for_prompt(self, max_strength: float = float("inf")) -> str:
+    def describe_for_prompt(self, max_strength: float = float("inf"), order: Optional[list[str]] = None) -> str:
+        """One line per vector, in `order` (names) if given, else registry order."""
         if not self.entries:
             return "(no steering vectors available — use extract_auto() to generate some)"
         lines = []
-        for name, e in self.entries.items():
+        for name in (order if order is not None else list(self.entries)):
+            e = self.entries[name]
             lo = max(e.safe_strength_min, -max_strength)
             hi = min(e.safe_strength_max, max_strength)
             lines.append(
