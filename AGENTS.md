@@ -263,9 +263,13 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 - `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
 - `{"name": "report", "arguments": {"concept": "sycophancy", "worked": true, "notes": "..."}}`
 
+`report` is only accepted once the vector has stopped steering the model (it expired or was dropped) and at least one unsteered turn has followed. A model being steered tends to become the state instead of noticing it, so it reports by looking back at its steered turns. Once a vector has ended, `agent.status()` (which appears in the system prompt and the `--auto` status message) lists it as one the model can report on, until it does.
+
+`agent.debrief()` ends a session's steering: it drops every vector, refuses further `steer` calls, and returns a status message listing the vectors the model can report on (or `None` if there are none). Send it as a `tool` message and give the model one more turn. The demo does this after the last `--auto` turn (`--no-debrief` to skip it). In testing, OLMo-2 mostly kept the steered voice through the unsteered debrief turn, because its own steered turns are in the context, so a debrief report is still not a sober one.
+
 ## Reports
 
-Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports.jsonl` (git-ignored). A report records the model, vector, layer, the vector file's sha256, `worked`, `notes` (capped at 2000 chars), the strength the vector was last steered at in the session, and `turns_since_steered` (0 = active during the reporting turn; both `null` if the model never steered with it), plus `turn`, `session_id`, `control` (the session's experimental condition; see Controlled studies), `modulo_version` and `schema_version`.
+Each `report` call is appended as one JSON line to `vectors/<model_slug>/reports.jsonl` (git-ignored). A report records the model, vector, layer, the vector file's sha256, `worked`, `notes` (capped at 2000 chars), the strength the vector was last steered at in the session, and `turns_since_steered` (at least 1, since reports wait until the vector has stopped; reports from before that rule can have 0, or `null` for both if the model never steered with it), plus `turn`, `session_id`, `control` (the session's experimental condition; see Controlled studies), `modulo_version` and `schema_version`.
 
 The format is defined in `modulo/reports.py`. `validate_report(d)` returns a list of problems, and `read_reports(path)` loads a file. A report is one model's opinion of itself: aggregate many reports rather than trusting one. Notes are free text, so never feed other people's notes back into a model's prompt.
 

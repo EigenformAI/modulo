@@ -287,9 +287,18 @@ def test_bad_steer_arguments_return_errors(agent, args):
 def test_unknown_tool_returns_error(agent):
     r = agent._execute(ToolCall("launch", {"concept": "a"}, ""))
     assert not r.ok and "Unknown tool" in r.message
+    r = agent._execute(ToolCall("response", {"content": "hello"}, ""))  # no concept: still an unknown tool
+    assert not r.ok and "Unknown tool 'response'" in r.message
+
+
+def _reportable(agent, name, strength=5.0):
+    """As if `name` steered the previous turn and has since stopped."""
+    agent._last_steered[name] = (strength, agent.turn)
+    agent.turn += 1
 
 
 def test_report_parses_string_booleans(agent):
+    _reportable(agent, "b")
     agent._execute(ToolCall("report", {"concept": "b", "worked": "false"}, ""))
     agent._execute(ToolCall("report", {"concept": "b", "worked": "true"}, ""))
     assert [r["worked"] for r in read_reports(agent.registry.reports_path)] == [False, True]
@@ -320,27 +329,74 @@ def _steered_step(agent, monkeypatch, output):
     return agent.step([{"role": "user", "content": "hi"}])
 
 
+REPORT_A = '{"name": "report", "arguments": {"concept": "a", "worked": true, "notes": "more playful"}}'
+
+
 def test_report_is_saved_with_steering_context(agent, monkeypatch):
     (agent.registry.vectors_dir / "a.pt").write_bytes(b"vector bytes")
     agent.apply("a", 5.0)
     _steered_step(agent, monkeypatch, "Feeling different.")
-    _steered_step(agent, monkeypatch,
-                  '{"name": "report", "arguments": {"concept": "a", "worked": true, "notes": "more playful"}}')
+    _steered_step(agent, monkeypatch, '{"name": "drop", "arguments": {"concept": "a"}}')
+    assert agent.reportable() == ["a"] and "a: ended, on cooldown (2 more turns); you can report on it now" in agent.status()
+    _steered_step(agent, monkeypatch, REPORT_A)
     [r] = read_reports(agent.registry.reports_path)
     assert validate_report(r) == []
     assert r["model"] == "test/model" and r["vector"] == "a" and r["layer"] == 0
     assert r["worked"] is True and r["notes"] == "more playful"
-    assert r["strength"] == pytest.approx(5.0 * DECAY_FACTOR)  # in effect during the reporting turn
-    assert r["turns_since_steered"] == 0 and r["turn"] == 2
+    assert r["strength"] == pytest.approx(5.0 * DECAY_FACTOR)  # in effect during the last steered turn
+    assert r["turns_since_steered"] == 1 and r["turn"] == 3
+    assert agent.reportable() == [] and "report on it" not in agent.status()
     assert r["session_id"] == agent.session_id
     assert len(r["vector_sha256"]) == 64
 
 
-def test_report_on_unsteered_vector_has_no_strength(agent):
+def test_reports_wait_until_the_vector_has_stopped(agent, monkeypatch):
+    r = agent._execute(ToolCall("report", {"concept": "b"}, ""))
+    assert not r.ok and "hasn't steered" in r.message
+    agent.apply("a", 5.0)
+    out = _steered_step(agent, monkeypatch, REPORT_A)  # steered by a this turn, still active
+    assert not out.tool_results[0].ok and "still active" in out.tool_results[0].message
+    out = _steered_step(agent, monkeypatch, '{"name": "drop", "arguments": {"concept": "a"}} ' + REPORT_A)
+    assert out.tool_results[0].ok and not out.tool_results[1].ok and "next turn" in out.tool_results[1].message
+    assert not agent.registry.reports_path.exists()
+
+
+def test_vector_expiring_naturally_becomes_reportable(agent, monkeypatch):
+    agent.apply("a", 0.2)
+    _steered_step(agent, monkeypatch, "one")
+    _steered_step(agent, monkeypatch, "two")  # 0.2 * 0.85**k falls below the floor after a few turns
+    while "a" in agent.active:
+        _steered_step(agent, monkeypatch, "more")
+    assert agent.status() == "  a: ended; you can report on it now"
+    # re-steering makes it reportable again after a report
+    _steered_step(agent, monkeypatch, REPORT_A)
+    assert agent.reportable() == []
+    agent.apply("a", 0.2)
+    while "a" in agent.active or agent._last_steered["a"][1] >= agent.turn:
+        _steered_step(agent, monkeypatch, "again")
+    assert agent.reportable() == ["a"]
+
+
+def test_debrief_drops_everything_and_lists_reportable_vectors(agent, monkeypatch):
+    fresh = SteeringAgent(model=None, tokenizer=None, registry=StubRegistry())
+    assert fresh.debrief() is None  # nothing steered, nothing to report on
+    agent.apply("a", 5.0)
+    _steered_step(agent, monkeypatch, "steered")
+    agent.apply("b", 5.0)  # applied on the last turn, never steered anything
+    note = agent.debrief()
+    assert agent.active == {} and agent.reportable() == ["a"]
+    assert "can report on now: a." in note and "b" not in note.split("now:")[1]
+    out = _steered_step(agent, monkeypatch, REPORT_A)
+    assert out.steering_before == {} and out.tool_results[0].ok
+    ok, msg = agent.apply("a", 5.0)
+    assert not ok and "session is over" in msg
+
+
+def test_report_notes_are_capped(agent):
+    _reportable(agent, "b")
     r = agent._execute(ToolCall("report", {"concept": "b", "notes": "x" * (MAX_NOTES_CHARS + 50)}, ""))
     assert r.ok
     [saved] = read_reports(agent.registry.reports_path)
-    assert saved["strength"] is None and saved["turns_since_steered"] is None
     assert saved["vector_sha256"] is None  # no vector file on disk
     assert len(saved["notes"]) == MAX_NOTES_CHARS and validate_report(saved) == []
 
@@ -349,11 +405,13 @@ def test_report_write_failure_returns_error(agent, tmp_path):
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("")
     agent.registry.vectors_dir = blocker
+    _reportable(agent, "a")
     r = agent._execute(ToolCall("report", {"concept": "a"}, ""))
     assert not r.ok and "could not be saved" in r.message
 
 
 def test_validate_report_rejects_bad_reports(agent):
+    _reportable(agent, "a")
     agent._execute(ToolCall("report", {"concept": "a"}, ""))
     [good] = read_reports(agent.registry.reports_path)
     assert validate_report("nope") == ["report is not a JSON object"]
@@ -404,7 +462,7 @@ def test_degenerate_turn_regenerates_with_updated_prompt(agent, monkeypatch):
     result = agent.step([{"role": "user", "content": "hi"}])
     assert result.degenerate_output is not None and result.raw_output == "Fine now."
     assert "a: +5.00" in prompts[0]
-    assert "a: +5.00" not in prompts[1] and "a: on cooldown" in prompts[1]
+    assert "a: +5.00" not in prompts[1] and "a: ended, on cooldown" in prompts[1]
 
 
 # --- experimental controls ---
@@ -458,6 +516,7 @@ def test_system_prompt_identical_across_controls_when_disclosed():
 def test_reports_record_the_control_condition(tmp_path):
     a = SteeringAgent(None, None, model_name="test/model", control="sham",
                       registry=StubRegistry(vectors_dir=tmp_path))
+    _reportable(a, "a")
     a._execute(ToolCall("report", {"concept": "a", "worked": True, "notes": "felt different"}, ""))
     [r] = read_reports(a.registry.reports_path)
     assert r["control"] == "sham" and validate_report(r) == []

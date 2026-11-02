@@ -9,7 +9,7 @@ Usage:
     python -m agent.loop                  # interactive REPL
     python -m agent.loop --seed "Hi!"     # seed with a user message
     python -m agent.loop --max-turns 20   # cap turns
-    python -m agent.loop --auto           # auto-continue (non-interactive)
+    python -m agent.loop --auto           # auto-continue (non-interactive), then a debrief turn
     python -m agent.loop --steer honesty=6 --model Qwen/Qwen2.5-3B-Instruct
 
 Controls (see modulo.agent.CONTROLS):
@@ -166,6 +166,9 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-new-tokens", type=int, default=300)
+    parser.add_argument("--no-debrief", action="store_true",
+                        help="--auto: skip the final unsteered turn in which the model can report on "
+                             "the vectors it used (see SteeringAgent.debrief)")
     parser.add_argument("--nll-threshold", type=float, default=None,
                         help="Treat steered outputs above this unsteered NLL as degenerate (off by default; "
                              "NLL doesn't separate word salad from heavy role-play, see AGENTS.md)")
@@ -250,6 +253,20 @@ def main():
                 role = "user"
             messages.append({"role": role, "content": nudge})
             logger.log_turn(turn + 1, role, nudge)
+
+    if args.auto and not args.no_debrief and turn == args.max_turns and not kill.killed:
+        # One unsteered turn to look back on the steered ones and report
+        note = agent.debrief()
+        if note:
+            messages.append({"role": "tool", "content": note})
+            logger.log_turn(turn + 1, "tool", note)
+            logger.log({"type": "debrief", "turn": turn + 1, "reportable": agent.reportable()})
+            print(f"\n--- Debrief (turn {turn + 1}) ---\n[tool] {note}")
+            result = run_turn(agent, messages, logger, turn + 1, gen_params)
+            print(f"\nAssistant: {result.prose}")
+            for m in result.tool_messages():
+                print(f"[tool] {m['content']}")
+            turn += 1
 
     print(f"\n[session ended after {turn} turns]")
     print(f"[log saved to {logger.log_path}]")
