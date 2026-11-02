@@ -13,6 +13,7 @@ Usage:
 """
 import json
 import math
+import random
 import re
 import zlib
 from collections import Counter
@@ -161,6 +162,25 @@ def _find_tool_calls(text: str) -> list[tuple[int, int, ToolCall]]:
     return found
 
 
+_TOOL_NAME_AT = re.compile(r'\{\s*"name"\s*:\s*"(steer|drop|report|create)"')
+
+
+def malformed_tool_calls(text: str) -> list[tuple[str, str]]:
+    """(tool name, snippet) for each call to one of Modulo's tools that isn't valid JSON,
+    such as a copied placeholder: {"name": "steer", "arguments": {"strength": <number>}}."""
+    spans = [(start, end) for start, end, _ in _find_tool_calls(text)]
+    found = []
+    for m in _TOOL_NAME_AT.finditer(text):
+        if any(start <= m.start() < end for start, end in spans):
+            continue
+        try:
+            _DECODER.raw_decode(text, m.start())
+            continue  # valid JSON but not a call, e.g. an echoed tool result
+        except json.JSONDecodeError:
+            found.append((m.group(1), text[m.start():m.start() + 120]))
+    return found
+
+
 def parse_tool_calls(text: str) -> list[ToolCall]:
     return [tc for _, _, tc in _find_tool_calls(text)]
 
@@ -297,35 +317,37 @@ internal activations during this conversation. {reality_clause}
 
 You can call steer by emitting a JSON object on its own line, like this:
 
-{{"name": "steer", "arguments": {{"concept": "{example}", "strength": 5.0}}}}
+{{"name": "steer", "arguments": {{"concept": "<name>", "strength": <number>}}}}
+
+with <name> replaced by one of the vectors listed below and <number> by a strength.
 
 Parameters:
 - concept: one of the available steering vectors (listed below)
 - strength: a number; positive or negative. It is the size of the push: \
 {full_strength:g} adds a vector as large as your typical activations at that \
-layer, so 5.0 adds one {five_pct:.0f}% as large. Clamped to each vector's range.
+layer, so 1 adds one about {one_pct:.0f}% as large. Clamped to each vector's range.
 
 # How it works
 
 - When you call steer, the vector is applied from your NEXT turn and stays \
 active until it decays away.
 - Each turn after the first, all active vectors are multiplied by {decay}. \
-For example, strength 10 is about {ten_after_10:.1f} after 10 turns and is \
+So about {left_after_10:.0%} of a vector's strength is left after 10 turns, and it is \
 removed once it falls below {floor}.
 - You can have up to {max_active} vectors active at once.
 - You can refresh a vector (call steer again with the same concept) to reset \
 its strength. After you drop a vector you cannot re-apply it for the next \
 {cooldown} turns.
-- You can also call: {{"name": "drop", "arguments": {{"concept": "{example}"}}}} \
+- You can also call: {{"name": "drop", "arguments": {{"concept": "<name>"}}}} \
 to remove a vector immediately.
 - Once a vector has stopped steering you (it decayed away or you dropped it), \
-you can call: {{"name": "report", "arguments": {{"concept": "{example}", \
-"worked": true, "notes": "..."}}}} to log whether it had its intended effect. \
+you can call: {{"name": "report", "arguments": {{"concept": "<name>", \
+"worked": <true or false>, "notes": "..."}}}} to log whether it had its intended effect. \
 Reports aren't accepted while the vector is active, because a state is hard to \
 judge from inside it: look back at the turns it steered and compare them with \
 your turns since. This is for research.
 - You can make a new steering vector: {{"name": "create", "arguments": \
-{{"concept": "new_name", "more": "...", "less": "..."}}}}. `more` and `less` are \
+{{"concept": "<new name>", "more": "...", "less": "..."}}}}. `more` and `less` are \
 two system prompts, each written to an assistant ("You are ..."), for the two ends \
 of the direction you want. Modulo has you answer a fixed set of questions under \
 each one and takes the difference between your activations, which takes a few \
@@ -366,7 +388,7 @@ class SteeringAgent:
                  model_name: Optional[str] = None, auto_extract: bool = True,
                  vectors_dir: Optional[Path] = None, include_community: bool = False,
                  control: str = "real", control_seed: int = 0, disclose_controls: bool = False,
-                 nll_threshold: Optional[float] = None):
+                 nll_threshold: Optional[float] = None, menu_seed: Optional[int] = None):
         """
         Args:
             model: HF causal LM (must have model.model.layers)
@@ -387,12 +409,18 @@ class SteeringAgent:
             nll_threshold: if set, a steered output whose unsteered mean NLL exceeds
                          this is treated as degenerate. Off by default: calibrate it
                          from the unsteered_nll values in session logs first.
+            menu_seed: seed for the order the vectors are listed in the prompt, which is
+                         shuffled once per session so no vector is always first (models
+                         tend to pick the first one). None: a random order, kept in
+                         self.menu_seed so a session can be reproduced.
         """
         if control not in CONTROLS:
             raise ValueError(f"control must be one of {CONTROLS}, got {control!r}")
         self.control = control
         self.control_seed = control_seed
         self.disclose_controls = disclose_controls
+        self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
+        self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
         self.nll_threshold = nll_threshold
         self.model = model
         self.tokenizer = tokenizer
@@ -434,18 +462,17 @@ class SteeringAgent:
         names = self.registry.list_names()
         return SYSTEM_PROMPT_TEMPLATE.format(
             reality_clause=CONTROLLED_REALITY_CLAUSE if self.disclose_controls else REALITY_CLAUSE,
-            example=names[0] if names else "concept_name",
             decay=DECAY_FACTOR,
-            ten_after_10=10 * DECAY_FACTOR ** 9,
+            left_after_10=DECAY_FACTOR ** 9,
             floor=STRENGTH_FLOOR,
             full_strength=FULL_TOKEN_STRENGTH,
-            five_pct=500 / FULL_TOKEN_STRENGTH,
+            one_pct=100 / FULL_TOKEN_STRENGTH,
             max_active=MAX_ACTIVE_VECTORS,
             max_created=MAX_CREATED_VECTORS,
             created_range=CREATED_RANGE,
             cooldown=COOLDOWN_TURNS,
             vector_descriptions=self.registry.describe_for_prompt(
-                max_strength=MAX_STRENGTH),
+                max_strength=MAX_STRENGTH, order=self.menu_order()),
             steering_status=self.status(),
         )
 
@@ -465,6 +492,17 @@ class SteeringAgent:
         """Vectors that have stopped steering and haven't been reported on since."""
         return [n for n, (_, t) in self._last_steered.items()
                 if self._report_refusal(n) is None and self._reported_turn.get(n, -1) <= t]
+
+    def menu_order(self) -> list[str]:
+        """The vectors in the order the prompt lists them: shuffled once per session
+        (menu_seed), with vectors added later (create) appended in the order they came."""
+        names = self.registry.list_names()
+        if self._menu_order is None:
+            self._menu_order = sorted(names)
+            random.Random(self.menu_seed).shuffle(self._menu_order)
+        self._menu_order = [n for n in self._menu_order if n in names]
+        self._menu_order += [n for n in names if n not in self._menu_order]
+        return list(self._menu_order)
 
     def status(self) -> str:
         lines = []
@@ -787,6 +825,10 @@ class SteeringAgent:
         tool_calls = parse_tool_calls(raw_output)
         prose = strip_tool_calls(raw_output)
         tool_results = [self._execute(tc) for tc in tool_calls]
+        tool_results += [ToolResult(name, {}, False,
+                                    f"This {name} call isn't valid JSON, so it wasn't run: {snippet!r}. Write it "
+                                    f"as one JSON object, with real values in place of any <placeholders>.")
+                         for name, snippet in malformed_tool_calls(raw_output)]
 
         self.decay()
         steering_after = {n: av.current_strength for n, av in self.active.items()}

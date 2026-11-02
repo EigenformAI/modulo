@@ -87,6 +87,8 @@ def session_metadata(agent: SteeringAgent, args, rng_seed: int, gen_params: dict
         "transformers": transformers.__version__,
         "control": agent.control,
         "control_seed": agent.control_seed,
+        "menu_seed": agent.menu_seed,
+        "menu_order": agent.menu_order(),
         "controlled_study": agent.disclose_controls,
         "blind": args.blind,
         "rng_seed": rng_seed,
@@ -206,6 +208,7 @@ def main():
     # Offer every vector we can: unverified index entries too (marked as such in the prompt)
     agent = SteeringAgent(model, tokenizer, model_name=args.model, include_community=True,
                           control=control, control_seed=rng_seed, disclose_controls=study,
+                          menu_seed=rng_seed,
                           nll_threshold=args.nll_threshold)
     for name, strength in steers:
         ok, msg = agent.apply(name, strength)
