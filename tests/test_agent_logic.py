@@ -18,6 +18,7 @@ class StubRegistry(VectorRegistry):
     def __init__(self, names=("a", "b"), vectors_dir=None):
         self.entries = {n: VectorEntry(name=n, file=f"{n}.pt", layer=0) for n in names}
         self.vectors_dir = vectors_dir
+        self._index_names, self._session_names = set(), set()
 
 
 @pytest.fixture
@@ -592,3 +593,76 @@ def test_starter_question_sets():
     for name in ("sycophancy", "refusal", "creativity"):
         assert len(by_name[name]["questions"]) == 20
     assert len(EXTRACTION_QUESTIONS) == 20
+
+
+# --- create tool ---
+
+class _FakeModel:
+    class config:
+        num_hidden_layers = 8
+
+
+@pytest.fixture
+def creator(tmp_path, monkeypatch):
+    import modulo.extraction as ext
+    calls = []
+
+    def fake_extract(model, tokenizer, prompt_a, prompt_b, layer, **kw):
+        calls.append((prompt_a, prompt_b, layer, kw))
+        return torch.arange(1.0, 9.0), (0.3 if "vague" in prompt_a else 0.85)
+
+    monkeypatch.setattr(ext, "extract_vector", fake_extract)
+    reg = StubRegistry(vectors_dir=tmp_path)
+    a = SteeringAgent(model=_FakeModel(), tokenizer=None, model_name="test/model", registry=reg)
+    a._calls = calls
+    return a
+
+
+def test_create_makes_a_session_only_vector(creator, tmp_path):
+    r = creator._execute(ToolCall("create", {"concept": "wonder", "more": "You are full of wonder.",
+                                             "less": "You are jaded."}, ""))
+    assert r.ok and "split-half agreement 0.85" in r.message.lower() and "low" not in r.message
+    assert creator._calls[0][:3] == ("You are full of wonder.", "You are jaded.", 4)
+    assert creator._calls[0][3]["batch_size"] and creator._calls[0][3]["return_halves"]
+    entry = creator.registry.get("wonder")
+    assert entry.layer == 4 and (tmp_path / entry.file).exists() and entry.safe_strength_max == 10
+    assert "wonder: [Made by you this session] Toward: You are full of wonder." in creator.build_system_prompt()
+    assert creator.apply("wonder", 6)[0] and creator.created["wonder"]["split_half"] == 0.85
+    creator.registry.registry_path = tmp_path / "registry.yaml"
+    creator.registry.save()
+    assert "wonder" not in (tmp_path / "registry.yaml").read_text()  # never reaches later sessions
+
+
+def test_create_rejects_bad_requests(creator):
+    def create(**args):
+        return creator._execute(ToolCall("create", args, ""))
+    assert "starting with a letter" in create(concept="2nd-self", more="x", less="y").message
+    assert "already a vector called 'a'" in create(concept="a", more="x", less="y").message
+    assert "non-empty" in create(concept="n", more="", less="y").message
+    assert "limit is" in create(concept="n", more="x" * 601, less="y").message
+    assert "the same" in create(concept="n", more="same", less=" same ").message
+    assert "low" in create(concept="fog", more="You are vague.", less="You are clear.").message
+    for i in range(5):
+        assert create(concept=f"v{i}", more="x", less="y").ok
+    assert "limit" in create(concept="one_more", more="x", less="y").message
+    assert create(concept="v0", more="x2", less="y2").ok  # re-making your own doesn't count again
+    creator.apply("v0", 3)
+    assert "Drop it" in create(concept="v0", more="x3", less="y3").message
+    assert not creator._calls[-1][0] == "x3"
+
+
+def test_names_with_hyphens_and_punctuation_are_normalized(creator):
+    r = creator._execute(ToolCall("create", {"concept": "Self-Referential", "more": "x", "less": "y"}, ""))
+    assert r.ok and "'self_referential'" in r.message
+    assert r.arguments["concept"] == "self_referential" and r.arguments["requested_concept"] == "Self-Referential"
+    assert creator._execute(ToolCall("steer", {"concept": "self-referential", "strength": 3}, "")).ok
+    assert "self_referential" in creator.active
+    assert creator._execute(ToolCall("steer", {"concept": "A!", "strength": 2}, "")).ok  # existing 'a'
+    r = creator._execute(ToolCall("steer", {"concept": "no-such-thing", "strength": 2}, ""))
+    assert not r.ok and "Unknown vector 'no-such-thing'" in r.message  # unknown names are reported as written
+
+
+def test_no_creating_after_the_debrief(creator):
+    creator.debrief()
+    r = creator._execute(ToolCall("create", {"concept": "late", "more": "x", "less": "y"}, ""))
+    assert not r.ok and "session is over" in r.message and not creator._calls

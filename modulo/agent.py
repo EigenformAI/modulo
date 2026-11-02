@@ -35,6 +35,16 @@ STRENGTH_FLOOR = 0.1
 MAX_ACTIVE_VECTORS = 4
 MAX_STRENGTH = 15.0  # assistant_axis is coherent to ~15 and collapses by ~25 (Qwen2.5-7B)
 COOLDOWN_TURNS = 2
+# create tool: vectors the model can make per session, and the limits on what it sends
+MAX_CREATED_VECTORS = 6
+CREATE_TEXT_MAX_CHARS = 600
+CREATED_RANGE = 10.0
+CREATE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def normalize_name(name: str) -> str:
+    """'Self-Referential' -> 'self_referential', 'optimism!' -> 'optimism'."""
+    return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
 # A turn whose prose is this similar (word-level) to one of the last
 # REPEAT_LOOKBACK assistant turns is discarded and regenerated once.
 REPEAT_SIMILARITY = 0.8
@@ -314,6 +324,14 @@ you can call: {{"name": "report", "arguments": {{"concept": "{example}", \
 Reports aren't accepted while the vector is active, because a state is hard to \
 judge from inside it: look back at the turns it steered and compare them with \
 your turns since. This is for research.
+- You can make a new steering vector: {{"name": "create", "arguments": \
+{{"concept": "new_name", "more": "...", "less": "..."}}}}. `more` and `less` are \
+two system prompts, each written to an assistant ("You are ..."), for the two ends \
+of the direction you want. Modulo has you answer a fixed set of questions under \
+each one and takes the difference between your activations, which takes a few \
+seconds. The vector can be used straight away, for the rest of this session \
+(strength range -{created_range:g} to {created_range:g}; up to {max_created} per session). \
+Names are made lowercase, with _ in place of spaces, hyphens and punctuation.
 - After your turn, the result of each tool call is sent back to you.
 
 # Available steering vectors
@@ -392,6 +410,8 @@ class SteeringAgent:
         self._reported_turn: dict[str, int] = {}
         self._debriefed = False  # set by debrief(): no more steering this session
         self.session_id = new_session_id()
+        # name -> details of each vector made with the create tool this session
+        self.created: dict[str, dict] = {}
         if model_name is None:
             model_name = getattr(getattr(model, "config", None), "_name_or_path", "unknown_model")
         self.model_name = model_name
@@ -421,6 +441,8 @@ class SteeringAgent:
             full_strength=FULL_TOKEN_STRENGTH,
             five_pct=500 / FULL_TOKEN_STRENGTH,
             max_active=MAX_ACTIVE_VECTORS,
+            max_created=MAX_CREATED_VECTORS,
+            created_range=CREATED_RANGE,
             cooldown=COOLDOWN_TURNS,
             vector_descriptions=self.registry.describe_for_prompt(
                 max_strength=MAX_STRENGTH),
@@ -458,6 +480,58 @@ class SteeringAgent:
             if name not in self._dropped_recently:
                 lines.append(f"  {name}: ended; you can report on it now")
         return "\n".join(lines) if lines else "No active steering vectors."
+
+    def create(self, name: str, more: str, less: str) -> tuple[bool, str]:
+        """Extract a new vector from two contrasting system prompts, for this session only.
+
+        It's saved under vectors/<model_slug>/created/ (for inspection) but never added to
+        registry.yaml, so the model's own wording doesn't reach later sessions' prompts.
+        """
+        from modulo.extraction import EXTRACTION_QUESTIONS, extract_vector
+
+        if self._debriefed:
+            return False, "The session is over, so no more vectors can be made. You can still report."
+        if not isinstance(name, str) or not CREATE_NAME.match(name):
+            return False, ("'concept' must be a name starting with a letter, up to 32 letters, digits and _ "
+                           "(spaces, hyphens and punctuation become _).")
+        for label, text in (("more", more), ("less", less)):
+            if not isinstance(text, str) or not text.strip():
+                return False, f"'{label}' must be a non-empty system prompt."
+            if len(text) > CREATE_TEXT_MAX_CHARS:
+                return False, f"'{label}' is {len(text)} characters; the limit is {CREATE_TEXT_MAX_CHARS}."
+        if more.strip() == less.strip():
+            return False, "'more' and 'less' are the same, so there is no direction between them."
+        if self.registry.get(name) is not None and name not in self.created:
+            return False, f"There is already a vector called '{name}'. Choose another name."
+        if name in self.active:
+            return False, f"'{name}' is active. Drop it before re-creating it."
+        if name not in self.created and len(self.created) >= MAX_CREATED_VECTORS:
+            return False, f"You have already made {MAX_CREATED_VECTORS} vectors this session, the limit."
+        layer = self.model.config.num_hidden_layers // 2
+        axis, half = extract_vector(self.model, self.tokenizer, more, less, layer,
+                                    questions=EXTRACTION_QUESTIONS, batch_size=2 * len(EXTRACTION_QUESTIONS),
+                                    return_halves=True)
+        import numpy as np
+        rel = Path("created") / f"{self.session_id}_{name}.npz"
+        (self.registry.vectors_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(self.registry.vectors_dir / rel, vector=axis.float().cpu().numpy())
+        entry = VectorEntry(
+            name=name, file=str(rel), layer=layer,
+            description=f"[Made by you this session] Toward: {more.strip()} Away from: {less.strip()}",
+            safe_strength_min=-CREATED_RANGE, safe_strength_max=CREATED_RANGE,
+            sign_convention="positive = toward the first, negative = toward the second",
+            source=f"created in session {self.session_id}: contrastive system prompts, mean over response "
+                   f"tokens, {len(EXTRACTION_QUESTIONS)} questions",
+        )
+        self.registry.add_session_entry(entry)
+        self._unit_vectors.pop(name, None)
+        self.created[name] = {"more": more, "less": less, "layer": layer, "file": str(rel),
+                              "split_half": round(half, 3), "turn": self.turn + 1}
+        note = (" That's low: the two prompts may not differ along one clear direction."
+                if half < 0.5 else "")
+        return True, (f"Created '{name}' at layer {layer} from {2 * len(EXTRACTION_QUESTIONS)} responses. "
+                      f"Split-half agreement {half:.2f} (1 = the two halves of the questions gave the "
+                      f"same direction).{note} You can steer with it now.")
 
     def apply(self, name: str, strength: float) -> tuple[bool, str]:
         entry = self.registry.get(name)
@@ -576,11 +650,17 @@ class SteeringAgent:
 
     def _execute(self, tc: ToolCall) -> ToolResult:
         args = tc.arguments
-        if tc.name not in ("steer", "drop", "report"):
-            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report.")
+        if tc.name not in ("steer", "drop", "report", "create"):
+            return ToolResult(tc.name, args, False, f"Unknown tool '{tc.name}'. Available: steer, drop, report, create.")
         concept = args.get("concept")
         if not isinstance(concept, str):
             return ToolResult(tc.name, args, False, "'concept' must be a string.")
+        # Accept 'self-referential' for 'self_referential', 'Optimism!' for 'optimism'
+        if self.registry.get(concept) is None and tc.name in ("steer", "drop", "report", "create"):
+            name = normalize_name(concept)
+            if name != concept and (tc.name == "create" or self.registry.get(name) is not None):
+                args = {**args, "concept": name, "requested_concept": concept}
+                concept = name
         if tc.name == "steer":
             try:
                 strength = float(args.get("strength", 0))
@@ -591,6 +671,8 @@ class SteeringAgent:
             ok, msg = self.apply(concept, strength)
         elif tc.name == "drop":
             ok, msg = self.drop(concept)
+        elif tc.name == "create":
+            ok, msg = self.create(concept, args.get("more"), args.get("less"))
         elif tc.name == "report":
             entry = self.registry.get(concept)
             if entry is None:

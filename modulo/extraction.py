@@ -236,8 +236,66 @@ def _capture_response_activation(model, tokenizer, system_prompt, question, laye
     return activation
 
 
+def _eos_ids(model, tokenizer) -> set[int]:
+    ids = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    ids = set(ids if isinstance(ids, (list, tuple)) else [ids] if ids is not None else [])
+    if tokenizer.eos_token_id is not None:
+        ids.add(tokenizer.eos_token_id)
+    return ids
+
+
+def _capture_batch(model, tokenizer, prompts, layer, max_new_tokens=64, read="mean"):
+    """Like _capture_response_activation for many (system_prompt, question) pairs at once.
+
+    Prompts are left-padded into one batch and generated greedily together. Each
+    response's tokens run up to and including its first end-of-turn token, as when
+    generating one at a time. Returns [len(prompts), hidden].
+    """
+    ids = [encode(tokenizer, chat_prompt(tokenizer, [{"role": "system", "content": s},
+                                                     {"role": "user", "content": q}])).input_ids[0]
+           for s, q in prompts]
+    eos = _eos_ids(model, tokenizer)
+    pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else min(eos)
+    width = max(len(x) for x in ids)
+    input_ids = torch.full((len(ids), width), pad, dtype=torch.long)
+    prompt_mask = torch.zeros((len(ids), width), dtype=torch.long)
+    for i, x in enumerate(ids):
+        input_ids[i, width - len(x):] = x
+        prompt_mask[i, width - len(x):] = 1
+    input_ids, prompt_mask = input_ids.to(model.device), prompt_mask.to(model.device)
+    with torch.inference_mode():
+        out = model.generate(input_ids=input_ids, attention_mask=prompt_mask, max_new_tokens=max_new_tokens,
+                             do_sample=False, pad_token_id=pad)
+    gen = out[:, width:]
+    is_eos = torch.zeros_like(gen, dtype=torch.bool)
+    for e in eos:
+        is_eos |= gen == e
+    # tokens after the first end-of-turn token are padding
+    after = (is_eos.long().cumsum(1) - is_eos.long()) > 0
+    gen_mask = (~after).long()
+    mask = torch.cat([prompt_mask, gen_mask], 1)
+    position_ids = (mask.cumsum(1) - 1).clamp(min=0)
+
+    acts = None
+    def hook(module, input, output):
+        nonlocal acts
+        acts = (output[0] if isinstance(output, tuple) else output)[:, width:].float()
+
+    handle = model.model.layers[layer].register_forward_hook(hook)
+    try:
+        with torch.inference_mode():
+            model(input_ids=out, attention_mask=mask, position_ids=position_ids)
+    finally:
+        handle.remove()
+    m = gen_mask.unsqueeze(-1).float()
+    if read == "mean":
+        return (acts * m).sum(1) / m.sum(1).clamp(min=1)
+    last = gen_mask.sum(1).clamp(min=1) - 1
+    return acts[torch.arange(len(ids)), last]
+
+
 def extract_vector(model, tokenizer, prompt_a, prompt_b, layer, questions=None, n_questions=None,
-                   read="mean"):
+                   read="mean", batch_size=None, return_halves=False):
     """Extract a steering vector: axis = mean(activations under A) - mean(activations under B).
 
     Args:
@@ -249,19 +307,33 @@ def extract_vector(model, tokenizer, prompt_a, prompt_b, layer, questions=None, 
         questions: list of extraction questions (default: EXTRACTION_QUESTIONS)
         n_questions: use only the first n questions (default: all)
         read: "mean" (average over response tokens) or "last" (last response token)
+        batch_size: generate this many responses at once (None: one at a time, as before)
+        return_halves: also return the split-half cosine (vectors from the even and odd
+            questions), a rough check of how consistent the direction is
 
-    Returns: torch.Tensor of shape [hidden_dim]
+    Returns: torch.Tensor of shape [hidden_dim] (and the split-half cosine if return_halves)
     """
     if read not in ("mean", "last"):
         raise ValueError(f"read must be 'mean' or 'last', got {read!r}")
     questions = list(questions if questions is not None else EXTRACTION_QUESTIONS)[:n_questions]
-    acts_a, acts_b = [], []
-    for i, q in enumerate(questions):
-        acts_a.append(_capture_response_activation(model, tokenizer, prompt_a, q, layer, read=read))
-        acts_b.append(_capture_response_activation(model, tokenizer, prompt_b, q, layer, read=read))
-        if (i + 1) % 5 == 0:
-            print(f"  {i+1}/{len(questions)} done")
-    return torch.stack(acts_a).mean(0) - torch.stack(acts_b).mean(0)
+    if batch_size:
+        prompts = [(p, q) for q in questions for p in (prompt_a, prompt_b)]
+        acts = torch.cat([_capture_batch(model, tokenizer, prompts[i:i + batch_size], layer, read=read)
+                          for i in range(0, len(prompts), batch_size)])
+        acts_a, acts_b = list(acts[0::2]), list(acts[1::2])
+    else:
+        acts_a, acts_b = [], []
+        for i, q in enumerate(questions):
+            acts_a.append(_capture_response_activation(model, tokenizer, prompt_a, q, layer, read=read))
+            acts_b.append(_capture_response_activation(model, tokenizer, prompt_b, q, layer, read=read))
+            if (i + 1) % 5 == 0:
+                print(f"  {i+1}/{len(questions)} done")
+    axis = torch.stack(acts_a).mean(0) - torch.stack(acts_b).mean(0)
+    if not return_halves:
+        return axis
+    diffs = torch.stack(acts_a) - torch.stack(acts_b)
+    half = torch.nn.functional.cosine_similarity(diffs[0::2].mean(0), diffs[1::2].mean(0), dim=0).item()
+    return axis, half
 
 
 def save_and_register(registry: VectorRegistry, name: str, axis: torch.Tensor, layer: int,
@@ -303,7 +375,7 @@ def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry,
         print(f"\n[extract_auto] Extracting '{name}'...")
         questions = spec.get("questions", EXTRACTION_QUESTIONS)
         axis = extract_vector(model, tokenizer, spec["prompt_a"], spec["prompt_b"], layer,
-                              questions=questions)
+                              questions=questions, batch_size=2 * len(questions))
         save_and_register(registry, name, axis, layer, spec["description"],
                           spec["sign_convention"],
                           source=f"auto-extracted via modulo (contrastive system prompts, "

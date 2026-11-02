@@ -4,7 +4,7 @@ This file gives an AI agent everything needed to install and run this project wi
 
 ## What this is
 
-A self-steering agent library: gives any local HF model the ability to steer its own activations via steering vectors. The model gets `steer`, `drop`, and `report` tools. Vectors decay each turn (0.85×) so it can escape loops. The goal is to observe what happens when a model can modify its own cognition.
+A self-steering agent library: gives any local HF model the ability to steer its own activations via steering vectors. The model gets `steer`, `drop`, `report` and `create` tools. Vectors decay each turn (0.85×) so it can escape loops. The goal is to observe what happens when a model can modify its own cognition.
 
 ## Two ways to use it
 
@@ -66,7 +66,7 @@ At startup the agent combines three sources for its model:
 
 1. **Your own vectors**: `vectors/<model_slug>/registry.yaml`, where extraction scripts register what you make. These win over an index vector of the same name.
 2. **The community index**: `community/vectors.yaml` in the repo (update the repo to get new entries; override with `MODULO_INDEX_PATH`). `verified` entries are loaded by default; unverified `community` entries only with `SteeringAgent(..., include_community=True)`, with a ±8 range unless a maintainer set one, and marked as unverified in the model's prompt. Files are downloaded from HuggingFace at their pinned revision, checked against their sha256 (and the model's dimensions), and cached in `vectors/<model_slug>/`. A cached file that doesn't match is reported and never overwritten. Index entries are kept in memory and never written to `registry.yaml`. Currently: Qwen2.5-7B-Instruct (assistant_axis).
-3. **Auto-extract**: the library extracts any starter vector the model doesn't have yet (sycophancy, refusal, creativity, formality, verbosity, confidence, emotion, humor, optimism, curiosity, introspection; `STARTER_VECTORS` in `modulo/extraction.py`) using contrastive system prompts, and registers them in `registry.yaml`. This takes several minutes on first run but works for any HF model. A vector of your own with a starter name is kept and not re-extracted.
+3. **Auto-extract**: the library extracts any starter vector the model doesn't have yet (sycophancy, refusal, creativity, formality, verbosity, confidence, emotion, humor, optimism, curiosity, introspection; `STARTER_VECTORS` in `modulo/extraction.py`) using contrastive system prompts, and registers them in `registry.yaml`. All 40 responses per vector are generated in one batch (about 3 s per vector on a 4090, about 20× faster than one at a time, giving vectors at cosine 0.98–0.997 to the one-at-a-time ones on four models), so this takes under a minute on first run and works for any HF model. A vector of your own with a starter name is kept and not re-extracted.
 
 Vectors are stored per-model in `vectors/<model_slug>/` (for the default model: `vectors/Qwen_Qwen2.5-7B-Instruct/`), resolved relative to the repo, not the working directory. Override the base with `MODULO_VECTORS_DIR`.
 
@@ -262,10 +262,17 @@ The model emits these as JSON objects anywhere in its output (bare or inside `<t
 - `{"name": "steer", "arguments": {"concept": "sycophancy", "strength": 5.0}}`
 - `{"name": "drop", "arguments": {"concept": "sycophancy"}}`
 - `{"name": "report", "arguments": {"concept": "sycophancy", "worked": true, "notes": "..."}}`
+- `{"name": "create", "arguments": {"concept": "new_name", "more": "...", "less": "..."}}`
 
 `report` is only accepted once the vector has stopped steering the model (it expired or was dropped) and at least one unsteered turn has followed. A model being steered tends to become the state instead of noticing it, so it reports by looking back at its steered turns. Once a vector has ended, `agent.status()` (which appears in the system prompt and the `--auto` status message) lists it as one the model can report on, until it does.
 
-`agent.debrief()` ends a session's steering: it drops every vector, refuses further `steer` calls, and returns a status message listing the vectors the model can report on (or `None` if there are none). Send it as a `tool` message and give the model one more turn. The demo does this after the last `--auto` turn (`--no-debrief` to skip it). In testing, OLMo-2 mostly kept the steered voice through the unsteered debrief turn, because its own steered turns are in the context, so a debrief report is still not a sober one.
+`agent.debrief()` ends a session's steering: it drops every vector, refuses further `steer` and `create` calls, and returns a status message listing the vectors the model can report on (or `None` if there are none). Send it as a `tool` message and give the model one more turn. The demo does this after the last `--auto` turn (`--no-debrief` to skip it). In testing, OLMo-2 mostly kept the steered voice through the unsteered debrief turn, because its own steered turns are in the context, so a debrief report is still not a sober one.
+
+`create` lets the model make its own vector. `more` and `less` are two system prompts for the ends of the direction it wants. Modulo extracts the vector the same way as the starters (20 general questions, mean over response tokens, the middle layer), with all 40 responses generated in one batch, which takes about 3 seconds on a 4090. The result tells the model the split-half agreement (the cosine between vectors from the even and odd questions) and warns it below 0.5.
+
+- **Session only:** a created vector can be used straight away and lasts for the session. It is saved in `vectors/<model_slug>/created/` for inspection and logged (prompts, file, sha256, split-half) as a `create` event, but never added to `registry.yaml`, so one session's wording never reaches another session's prompt.
+- **Names:** made lowercase, with `_` in place of spaces, hyphens and punctuation (`self-referential` becomes `self_referential`). `steer`, `drop` and `report` accept names written the same way, so `optimism!` finds `optimism`; the tool result and log use the normalized name, and the log keeps what the model wrote as `requested_concept`.
+- **Limits:** up to `MAX_CREATED_VECTORS` (6) per session, names that don't clash with an existing vector, prompts of up to 600 characters, a ±10 range like the starters, unverified. Re-making one of its own vectors replaces it (not while it's active).
 
 ## Reports
 
@@ -334,7 +341,7 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 ## Troubleshooting
 
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
-- **First run is slow**: Auto-extraction generates the starter vectors the model is missing (11 at most, several minutes). Subsequent runs load from disk. Check new ones with `verify_vector.py` before trusting their ±10 default range.
+- **First run is slow**: Auto-extraction generates the starter vectors the model is missing (11 at most, about a minute). Subsequent runs load from disk. Check new ones with `verify_vector.py` before trusting their ±10 default range.
 - **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
 - **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range (in `registry.yaml` for your own vectors, in `community/vectors.yaml` for index vectors) or lower `MAX_STRENGTH`.
 - **An index vector doesn't load**: Check the `[registry]` lines printed at startup. A sha256 mismatch on a cached file means the file in `vectors/<model_slug>/` isn't the one the index pins; delete it to re-download. Unverified entries also need `include_community=True`.

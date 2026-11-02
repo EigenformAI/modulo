@@ -98,6 +98,8 @@ class VectorRegistry:
         self.entries: dict[str, VectorEntry] = {}
         # Names that came from the community index: kept in memory, never saved
         self._index_names: set[str] = set()
+        # Names of vectors made during a session (SteeringAgent's create tool): in memory, never saved
+        self._session_names: set[str] = set()
         self.load()
 
     def load(self):
@@ -153,7 +155,7 @@ class VectorRegistry:
         """
         data = []
         for entry in self.entries.values():
-            if entry.name not in self._index_names:
+            if entry.name not in self._index_names and entry.name not in self._session_names:
                 data.append(dict(entry.__dict__))
         header = []
         if self.registry_path.exists():
@@ -169,6 +171,16 @@ class VectorRegistry:
     def add_entry(self, entry: VectorEntry):
         self.entries[entry.name] = entry
         self._index_names.discard(entry.name)
+
+    def add_session_entry(self, entry: VectorEntry):
+        """Add a vector for this session only: listed and loadable, but never saved."""
+        self.entries[entry.name] = entry
+        self._index_names.discard(entry.name)
+        self._session_names.add(entry.name)
+
+    @property
+    def session_names(self) -> set[str]:
+        return set(self._session_names)
 
     def add_index_entries(self, entries: list[VectorEntry]) -> list[str]:
         """Add community-index vectors in memory. Your own vectors win on a name clash."""
