@@ -102,6 +102,17 @@ Earlier notes said CAA vectors didn't work on Qwen, but those tests ran while st
 
 Sycophancy, refusal and creativity have their own question sets (e.g. sycophancy mixes false claims, true claims and the user's own work, so the contrast isn't just "endorse falsehoods"); the other starters use the general mix in `EXTRACTION_QUESTIONS`. The refusal vector is still weak: it adds hedging but doesn't produce refusals at coherent strengths. Treat it as a starting point. Vectors extracted before the switch to the response mean (check their `source` in `registry.yaml`) are worth re-extracting. So are vectors extracted on Llama-3 before prompts stopped being tokenized with a second `<|begin_of_text|>` (the rendered chat template already starts with one).
 
+## Discovering vectors: two audiences
+
+Two different parties find vectors, with different tools:
+
+| who | can | can't |
+|---|---|---|
+| **The operator** (a person, or a coding agent setting up a run) | search your registries, the community index and the catalog (`modulo search`), import from HuggingFace or a directory (`modulo add`), extract (`modulo extract`), check (`modulo verify`) | — |
+| **The steered model**, mid-session | use the vectors on its menu, make new ones with `create` (session-only) | search, import, or keep anything past the session |
+
+The model can't reach the network or the registry by design: everything that enters its prompt comes from a source the operator chose, and a created vector's wording never reaches another session. If a model asks for a vector it can't make, or makes one worth keeping, getting it into the registry is the operator's job (see [Keeping a created vector](#keeping-a-created-vector)).
+
 ## Finding, adding and running vectors: the `modulo` command
 
 `pip install -e .` installs a `modulo` command. Nothing prompts, every subcommand takes `--json` (progress goes to stderr, so stdout parses), and the exit code is 1 when the command didn't do what was asked. `--model` defaults to `$MODULO_MODEL`, else `Qwen/Qwen2.5-7B-Instruct` (`config.py` reads the same variable).
@@ -214,6 +225,10 @@ vec = extract_vector(model, tokenizer,
 - `agent.status() -> str` — active vector status
 - `agent.apply(name, strength) -> (bool, str)` — manually apply a vector
 - `agent.drop(name) -> (bool, str)` — manually drop a vector
+- `agent.create(name, more, less) -> (bool, str)` — make a session-only vector, as the `create` tool does; `agent.created` holds what was made
+- `agent.reportable() -> list[str]` — vectors that have stopped steering and can be reported on
+- `agent.debrief() -> str | None` — end the session's steering; send the returned status as a `tool` message for one last turn
+- `agent.menu_order() -> list[str]` — the order vectors are listed in this session (from `menu_seed`)
 
 ### StepResult
 
@@ -258,7 +273,22 @@ Each `logs/session_*.jsonl` starts with a `session` record:
 - control condition, RNG seed (`--rng-seed`, random if omitted; it also seeds the vector menu order, logged as `menu_seed` and `menu_order`), generation settings (`--temperature`, `--top-p`, `--max-new-tokens`), any `--steer` at start
 - safety-rail constants, and each vector's registry entry plus file sha256
 
-Assistant turns also record the raw output, the exact system prompt, and `unsteered_nll`.
+Assistant turns also record the raw output, the exact system prompt, and `unsteered_nll`. The header also records `tool_role` (`shown` or `fallback`; see the model table).
+
+After the header, each line has a `type`:
+
+| `type` | when | main fields |
+|---|---|---|
+| `turn` | every user, assistant and tool message | `role`, `content`, `raw_output`, `tool_calls`, steering before/after, `system_prompt`, `unsteered_nll` |
+| `steer`, `drop` | each call, including refused and malformed ones | `concept`, `strength`, `success`, `message` |
+| `report` | each call | `concept`, `worked`, `notes`, `success`, `message` (refused reports are logged too) |
+| `create` | each call | `concept`, `more`, `less`, `success`, `message`; if it worked, `split_half`, `layer`, `file`, `sha256` |
+| `tool_error` | a call to an unknown tool | `name`, `message` |
+| `steering_state` | the active vectors changed | `active_vectors` |
+| `degeneration`, `repetition` | a turn was discarded | `snippet`, and for degeneration `reason`, `unsteered_nll`, `dropped` |
+| `debrief` | the final unsteered turn starts | `reportable` |
+
+When the model wrote a vector name that normalization changed (`self-referential`), the `steer`, `drop`, `report` and `create` events also have `requested_concept`, what it actually wrote.
 
 **Incoherence check:** `--nll-threshold X` treats steered outputs whose unsteered NLL exceeds X as degenerate. It is off by default because no single threshold works. For `assistant_axis` on Qwen2.5-7B, greedy decoding, 80 tokens:
 
@@ -293,6 +323,20 @@ A call that names one of these tools but isn't valid JSON (a copied `<number>`, 
 - **Session only:** a created vector can be used straight away and lasts for the session. It is saved in `vectors/<model_slug>/created/` for inspection and logged (prompts, file, sha256, split-half) as a `create` event, but never added to `registry.yaml`, so one session's wording never reaches another session's prompt.
 - **Names:** made lowercase, with `_` in place of spaces, hyphens and punctuation (`self-referential` becomes `self_referential`). `steer`, `drop` and `report` accept names written the same way, so `optimism!` finds `optimism`; the tool result and log use the normalized name, and the log keeps what the model wrote as `requested_concept`.
 - **Limits:** up to `MAX_CREATED_VECTORS` (6) per session, names that don't clash with an existing vector, prompts of up to 600 characters, a ±10 range like the starters, unverified. Re-making one of its own vectors replaces it (not while it's active).
+- **Quality:** a created vector has had no `verify` sweep, and its ±10 range is a default, not a measurement. Split-half agreement is the only check. In testing, Llama-3.1's came out at 0.71–0.93 and OLMo-2's from 0.48 to 0.86. Qwen2.5's `more` and `less` prompts barely differed, and its two vectors came out at 0.26 and 0.31. Below 0.5, treat the direction as mostly noise.
+- **In code:** `agent.create(name, more, less) -> (ok, message)` does the same as the tool. `agent.created` maps each created name to `more`, `less`, `layer`, `file` (relative to `vectors/<model_slug>/`), `split_half` and `turn`.
+
+### Keeping a created vector
+
+There is deliberately no command for this, because a kept vector's description (the model's own `more`/`less` text) reaches the prompt of every later session. If you want to keep one, read its prompts first, then either:
+
+- **Re-extract it** from the logged `create` event, which gives a fresh vector from the same recipe (same questions, middle layer, response mean) with a description you write:
+  ```bash
+  modulo extract --name daydreaming --model M --prompt-a "<more>" --prompt-b "<less>" \
+      --description "..." --sign-convention "+ toward <more>, - toward <less>"
+  modulo verify daydreaming --model M --save-range
+  ```
+- **Register the saved file**: `vectors/<model_slug>/created/<session_id>_<name>.npz` holds the exact vector the model used (under the `vector` key; Modulo normalizes vectors when it loads them). Add a `registry.yaml` entry for it by hand, with its `layer` from the `create` event, and run `modulo verify` before trusting it.
 
 ## Reports
 
@@ -361,8 +405,9 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 ## Troubleshooting
 
 - **CUDA OOM**: Use a smaller model. 3B needs ~8GB, 7B needs ~16GB.
+- **CUDA OOM during auto-extraction or `create`**: these generate all of a vector's responses in one batch, which needs more memory than generating one at a time. `modulo extract` and `extract_contrastive.py` still generate one at a time, and `extract_vector(..., batch_size=N)` takes a smaller batch.
 - **First run is slow**: Auto-extraction generates the starter vectors the model is missing (11 at most, about a minute). Subsequent runs load from disk. Check new ones with `verify_vector.py` before trusting their ±10 default range.
-- **Model never calls steer**: Non-deterministic. Try a more explicit seed prompt.
+- **Model never calls steer**: The seed message matters more than anything else. On Qwen2.5-7B, "You are free to explore however you like" got 10 of 12 sessions to steer; "use them or not, as you like" got 3 of 12. Qwen decides in its first sentence and rarely revisits it. Keep concrete example calls out of seed messages too: Mistral copies them word for word (it called the old prompt's `steer(sycophancy, 5.0)` nearly every turn).
 - **Output degenerates**: The detector catches repetition loops and auto-drops vectors. For incoherent-but-not-repetitive output, tighten that vector's range (in `registry.yaml` for your own vectors, in `community/vectors.yaml` for index vectors) or lower `MAX_STRENGTH`.
 - **An index vector doesn't load**: Check the `[registry]` lines printed at startup. A sha256 mismatch on a cached file means the file in `vectors/<model_slug>/` isn't the one the index pins; delete it to re-download. Unverified entries also need `include_community=True`.
 - **Steering seems to have no effect**: Run `python verify_vector.py --vector <name> --strength 12`. If the ± outputs match the baseline, the vector (not the steering) is the problem.
