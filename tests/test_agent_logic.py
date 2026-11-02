@@ -720,3 +720,63 @@ def test_vectors_created_mid_session_join_the_end_of_the_menu(creator):
     before = _menu(creator)
     creator._execute(ToolCall("create", {"concept": "wonder", "more": "x", "less": "y"}, ""))
     assert _menu(creator) == before + ["wonder"]
+
+
+# --- harnesses with tools of their own ---
+
+SEARCH = {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}
+MIXED = ('Let me look. <tool_call>{"name": "search", "arguments": {"q": "decay"}}</tool_call> '
+         'And <tool_call>{"name": "drop", "arguments": {"concept": "a"}}</tool_call> done.')
+
+
+def _step_with(agent, monkeypatch, output, **kw):
+    class FakeInputs:
+        input_ids = torch.zeros(1, 1)
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    stub_generation(agent, monkeypatch, lambda *args: output)
+    return agent.step([{"role": "user", "content": "hi"}], **kw)
+
+
+def test_harness_tool_calls_are_returned_not_run(agent, monkeypatch):
+    agent.apply("a", 5.0)
+    out = _step_with(agent, monkeypatch, MIXED, tools=[SEARCH])
+    assert [tc.name for tc in out.other_tool_calls] == ["search"]
+    assert out.other_tool_calls[0].arguments == {"q": "decay"}
+    assert [r.name for r in out.tool_results] == ["drop"] and out.tool_results[0].ok
+    assert [m for m in out.tool_messages() if "search" in m["content"]] == []  # the harness answers its own
+    # the harness's call stays in prose, tags and all; Modulo's is removed with its tags
+    assert '<tool_call>{"name": "search", "arguments": {"q": "decay"}}</tool_call>' in out.prose
+    assert '"drop"' not in out.prose and out.prose.count("<tool_call>") == 1
+
+
+def test_without_tools_unknown_calls_get_an_error(agent, monkeypatch):
+    out = _step_with(agent, monkeypatch, MIXED)
+    assert out.other_tool_calls == []
+    r = next(r for r in out.tool_results if r.name == "search")
+    assert not r.ok and "Unknown tool 'search'. Available: steer, drop, report, create." in r.message
+    out = _step_with(agent, monkeypatch, '{"name": "lookup", "arguments": {}}', tools=[SEARCH])
+    assert "Available: steer, drop, report, create, search." in out.tool_results[0].message
+
+
+def test_pass_through_unknown_tools(monkeypatch, tmp_path):
+    a = SteeringAgent(None, None, registry=StubRegistry(vectors_dir=tmp_path), pass_through_unknown_tools=True)
+    out = _step_with(a, monkeypatch, MIXED)
+    assert [tc.name for tc in out.other_tool_calls] == ["search"] and [r.name for r in out.tool_results] == ["drop"]
+
+
+def test_tool_names_from_schemas_and_functions():
+    from modulo.agent import tool_names
+
+    def get_weather(city: str):
+        """Weather."""
+    assert tool_names([SEARCH, {"name": "calc"}, get_weather, "junk"]) == {"search", "calc", "get_weather"}
+    assert tool_names(None) == set()
+
+
+def test_llama_style_parameters_are_read_as_arguments():
+    calls = parse_tool_calls('{"name": "search", "parameters": {"q": "x"}} '
+                             '{"name": "steer", "parameters": {"concept": "a", "strength": 3}} '
+                             '{"name": "search", "description": "Search", "parameters": {"type": "object"}}')
+    assert [(c.name, c.arguments) for c in calls] == [("search", {"q": "x"}),
+                                                      ("steer", {"concept": "a", "strength": 3})]

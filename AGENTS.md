@@ -23,6 +23,18 @@ Install it into the harness's environment with `pip install -e /path/to/modulo`.
 
 The agent harness calls `agent.step(messages)` each turn instead of `model.generate()`, then appends the assistant output and `result.tool_messages()` (role `tool`) so the model sees whether its calls worked. If there are tool messages, give the model the next turn. If `messages` starts with a system message, it is merged into the steering system prompt. Steering is transparent — the harness doesn't need to know about hooks or vectors.
 
+**If the harness has tools of its own**, pass their schemas (or functions, as for `apply_chat_template`) with `agent.step(messages, tools=[...])`. They're given to the chat template, and calls to them come back in `result.other_tool_calls`, not run. They're left in `result.prose` (with any `<tool_call>` tags) and in `raw_output`. Modulo's own calls are run and removed from `prose`, and `result.tool_messages()` holds only their results. Run the harness's calls yourself and append their results after Modulo's:
+
+```python
+result = agent.step(messages, tools=my_tools)
+messages += [{"role": "assistant", "content": result.raw_output}]
+messages += result.tool_messages()
+for call in result.other_tool_calls:     # ToolCall(name, arguments, raw)
+    messages.append({"role": "tool", "content": run_my_tool(call.name, call.arguments)})
+```
+
+A harness that describes its tools in its own system prompt instead can pass `SteeringAgent(..., pass_through_unknown_tools=True)`, which treats every call that isn't Modulo's as the harness's. Without either, a call to a tool Modulo doesn't know gets an "Unknown tool" result, which suits the standalone demo, where the model has no other tools.
+
 `agent.apply()` / `agent.drop()` called between steps behave like the model's own tool calls: an applied vector gets one full-strength steered turn, and a drop blocks re-applying for `COOLDOWN_TURNS` turns.
 
 Chat templates must accept a `system` role. Tool results are sent as role `tool`. If a model's template can't show that role, they're sent instead as user messages starting with `[Tool result]`, with consecutive user messages merged. Modulo checks this once per tokenizer (`modulo.chat.supports_tool_role`), and session logs record it as `tool_role`.
@@ -30,8 +42,8 @@ Chat templates must accept a `system` role. Tool results are sent as role `tool`
 | model | role `tool` | notes |
 |---|---|---|
 | Qwen2.5 | shown | |
-| Llama-3.1 | shown | |
-| OLMo-2 | fallback | its template silently drops `tool` messages |
+| Llama-3.1 | shown | with `tools=`, its template asks for `{"name": ..., "parameters": {...}}`; Modulo reads `parameters` as `arguments` |
+| OLMo-2 | fallback | its template silently drops `tool` messages, and ignores `tools=`: describe a harness's tools in its system prompt and use `pass_through_unknown_tools=True` |
 | Mistral-7B-Instruct-v0.3 | fallback | its template requires tool-call IDs and strictly alternating turns, and puts the system prompt in the latest user message. Its tokenizer needs `sentencepiece` and `protobuf`. |
 | Gemma-2 | — | rejects the `system` role, so it isn't supported yet |
 
@@ -197,7 +209,7 @@ vec = extract_vector(model, tokenizer,
 
 ### SteeringAgent methods
 
-- `agent.step(messages, max_new_tokens=300, temperature=0.7, top_p=0.9) -> StepResult`
+- `agent.step(messages, max_new_tokens=300, temperature=0.7, top_p=0.9, tools=None) -> StepResult`
 - `agent.build_system_prompt() -> str` — system prompt describing the steer tool
 - `agent.status() -> str` — active vector status
 - `agent.apply(name, strength) -> (bool, str)` — manually apply a vector
@@ -207,7 +219,8 @@ vec = extract_vector(model, tokenizer,
 
 - `prose` — model output with tool calls stripped
 - `raw_output` — full model output
-- `tool_calls` — list of `ToolCall(name, arguments, raw)`
+- `tool_calls` — list of `ToolCall(name, arguments, raw)` that Modulo handled (its own tools, and unknown names)
+- `other_tool_calls` — calls to the harness's own tools (`tools=` or `pass_through_unknown_tools`), not run
 - `tool_results` — list of `ToolResult(name, arguments, ok, message)`
 - `degenerate_output` / `degenerate_reason` — the discarded steered output and why (`"repetition"` or `"nll"`), if the degeneration detector fired
 - `unsteered_nll` — mean per-token NLL of the steered output under the unsteered model (steered turns only)
