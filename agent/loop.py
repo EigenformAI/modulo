@@ -116,6 +116,11 @@ class KillSwitch:
         print("\n[kill switch] SIGINT received — will stop after this turn. Ctrl-C again to stop now.")
 
 
+def _requested(r) -> dict:
+    """The name as the model wrote it, when it was normalized ('self-referential')."""
+    return {"requested_concept": r.arguments["requested_concept"]} if "requested_concept" in r.arguments else {}
+
+
 def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: int, gen_params: dict):
     result = agent.step(messages, **gen_params)
     logger.log_turn(turn, "assistant", result.prose, result.tool_calls,
@@ -130,10 +135,17 @@ def run_turn(agent: SteeringAgent, messages: list, logger: SessionLogger, turn: 
     # Log tool calls individually for replay
     for r in result.tool_results:
         if r.name in ("steer", "drop"):
-            logger.log({"type": r.name, "turn": turn, "concept": r.arguments.get("concept"),
+            logger.log({"type": r.name, "turn": turn, "concept": r.arguments.get("concept"), **_requested(r),
                         "strength": r.arguments.get("strength"), "success": r.ok, "message": r.message})
+        elif r.name == "create":
+            info = agent.created.get(r.arguments.get("concept")) if r.ok else None
+            logger.log({"type": "create", "turn": turn, "concept": r.arguments.get("concept"), **_requested(r),
+                        "more": r.arguments.get("more"), "less": r.arguments.get("less"), "success": r.ok,
+                        "message": r.message, **({"split_half": info["split_half"], "layer": info["layer"],
+                        "file": info["file"], "sha256": file_sha256(agent.registry.vectors_dir / info["file"])}
+                        if info else {})})
         elif r.name == "report":
-            logger.log({"type": "report", "turn": turn, "concept": r.arguments.get("concept"),
+            logger.log({"type": "report", "turn": turn, "concept": r.arguments.get("concept"), **_requested(r),
                         "worked": r.arguments.get("worked"), "notes": r.arguments.get("notes"),
                         "success": r.ok, "message": r.message})
         else:
