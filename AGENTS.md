@@ -13,7 +13,7 @@ A self-steering agent library: gives any local HF model the ability to steer its
 ```python
 from modulo import SteeringAgent
 
-agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers
+agent = SteeringAgent(model, tokenizer)  # HF causal LM, plain or PEFT-wrapped
 result = agent.step(messages)             # -> StepResult
 messages += [{"role": "assistant", "content": result.raw_output}]
 messages += result.tool_messages()        # tool results back to the model
@@ -412,4 +412,4 @@ Run the GPU tests after touching anything in the steering path (`_SteeringHooks`
 - **An index vector doesn't load**: Check the `[registry]` lines printed at startup. A sha256 mismatch on a cached file means the file in `vectors/<model_slug>/` isn't the one the index pins; delete it to re-download. Unverified entries also need `include_community=True`.
 - **Steering seems to have no effect**: Run `python verify_vector.py --vector <name> --strength 12`. If the ± outputs match the baseline, the vector (not the steering) is the problem.
 - **Model downloaded twice**: `HF_HOME` is set to `/workspace/hf_cache` when `/workspace` exists, which only works if `config` is imported before `transformers` (the entry points do this). Older runs may have left a copy in `~/.cache/huggingface`.
-- **`model.model.layers` not found**: The library assumes standard HF architecture. Custom model classes may need adapter code.
+- **"Can't find the decoder layers"**: `modulo.layers.decoder_layers` looks through PEFT wrappers and tries the usual paths (`model.layers`, `model.language_model.layers`, `transformer.h`, `gpt_neox.layers`, ...), then any `ModuleList` as long as the config's `num_hidden_layers`. A custom model class that matches none of these needs its path added to `LAYER_PATHS`.

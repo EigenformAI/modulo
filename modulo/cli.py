@@ -193,8 +193,9 @@ def cmd_add(args) -> int:
 
 def cmd_extract(args) -> int:
     from modulo.extraction import EXTRACTION_QUESTIONS, extract_vector, save_and_register
+    from modulo.layers import num_layers
     model, tokenizer = _load_model(args.model)
-    layer = args.layer if args.layer is not None else model.config.num_hidden_layers // 2
+    layer = args.layer if args.layer is not None else num_layers(model) // 2
     questions = EXTRACTION_QUESTIONS[: args.n_questions]
     print(f"Extracting '{args.name}' at layer {layer} from {len(questions)} questions...", file=sys.stderr)
     axis = extract_vector(model, tokenizer, args.prompt_a, args.prompt_b, layer, questions, read=args.read)

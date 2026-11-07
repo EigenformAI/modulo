@@ -26,6 +26,7 @@ from typing import Optional
 import torch
 
 from modulo.chat import chat_prompt, encode
+from modulo.layers import decoder_layers, num_layers
 from modulo.registry import VectorRegistry, VectorEntry, DEFAULT_VECTORS_DIR
 from modulo.reports import make_report, new_session_id
 
@@ -313,7 +314,7 @@ class _SteeringHooks:
         return hook
 
     def __enter__(self):
-        layers = self.model.model.layers
+        layers = decoder_layers(self.model)
         for layer, vec in self.layer_vectors.items():
             self.handles.append(layers[layer].register_forward_hook(self._make_hook(vec)))
         return self
@@ -413,7 +414,8 @@ But you are encouraged to experiment — this is the point of the experiment.
 class SteeringAgent:
     """Gives a model the ability to steer its own activations.
 
-    Works with HF causal LMs that expose decoder layers as model.model.layers
+    Works with HF causal LMs, PEFT-wrapped or not, whose decoder layers
+    modulo.layers.decoder_layers can find (model.model.layers for most)
     (Llama/Qwen/Mistral-style architectures).
     """
 
@@ -425,7 +427,7 @@ class SteeringAgent:
                  pass_through_unknown_tools: bool = False):
         """
         Args:
-            model: HF causal LM (must have model.model.layers)
+            model: HF causal LM, optionally PEFT-wrapped (see modulo.layers)
             tokenizer: matching tokenizer
             registry: pre-built VectorRegistry. If None, auto-creates one for
                       the model (community index vectors, else auto-extracts).
@@ -585,7 +587,7 @@ class SteeringAgent:
             return False, f"'{name}' is active. Drop it before re-creating it."
         if name not in self.created and len(self.created) >= MAX_CREATED_VECTORS:
             return False, f"You have already made {MAX_CREATED_VECTORS} vectors this session, the limit."
-        layer = self.model.config.num_hidden_layers // 2
+        layer = num_layers(self.model) // 2
         axis, half = extract_vector(self.model, self.tokenizer, more, less, layer,
                                     questions=EXTRACTION_QUESTIONS, batch_size=2 * len(EXTRACTION_QUESTIONS),
                                     return_halves=True)
@@ -701,7 +703,7 @@ class SteeringAgent:
                 h = output[0] if isinstance(output, tuple) else output
                 captured["h"] = h[0].float()
 
-            handle = self.model.model.layers[layer].register_forward_hook(hook)
+            handle = decoder_layers(self.model)[layer].register_forward_hook(hook)
             try:
                 with torch.inference_mode():
                     self.model(out)

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from modulo.chat import chat_prompt, encode
+from modulo.layers import decoder_layers, num_layers
 from modulo.registry import VectorEntry, VectorRegistry
 
 
@@ -227,7 +228,7 @@ def _capture_response_activation(model, tokenizer, system_prompt, question, laye
         resp = act[0, prompt_len:].float()
         activation = (resp.mean(0) if read == "mean" else resp[-1]).detach().clone()
 
-    handle = model.model.layers[layer].register_forward_hook(hook)
+    handle = decoder_layers(model)[layer].register_forward_hook(hook)
     try:
         with torch.inference_mode():
             model(**full_inputs)
@@ -281,7 +282,7 @@ def _capture_batch(model, tokenizer, prompts, layer, max_new_tokens=64, read="me
         nonlocal acts
         acts = (output[0] if isinstance(output, tuple) else output)[:, width:].float()
 
-    handle = model.model.layers[layer].register_forward_hook(hook)
+    handle = decoder_layers(model)[layer].register_forward_hook(hook)
     try:
         with torch.inference_mode():
             model(input_ids=out, attention_mask=mask, position_ids=position_ids)
@@ -299,7 +300,7 @@ def extract_vector(model, tokenizer, prompt_a, prompt_b, layer, questions=None, 
     """Extract a steering vector: axis = mean(activations under A) - mean(activations under B).
 
     Args:
-        model: HF causal LM with model.model.layers (standard HF architecture)
+        model: HF causal LM, optionally PEFT-wrapped (see modulo.layers)
         tokenizer: matching tokenizer
         prompt_a: system prompt for the positive direction
         prompt_b: system prompt for the negative direction
@@ -363,7 +364,7 @@ def extract_auto(model, tokenizer, model_name: str, vectors_dir: Path, registry,
     ...) using contrastive system prompts. Saves them and adds them to the
     registry. With only_missing=True, skips names the registry already has.
     """
-    n_layers = model.config.num_hidden_layers
+    n_layers = num_layers(model)
     if layer is None:
         layer = n_layers // 2  # mid-layer default
     specs = [s for s in STARTER_VECTORS if not (only_missing and registry.get(s["name"]))]
