@@ -16,6 +16,7 @@ import config  # sets HF_HOME before transformers is imported
 from load_model import load_model_and_tokenizer
 from modulo import SteeringAgent
 from modulo.chat import chat_prompt, encode
+from modulo.layers import decoder_layers
 
 VECTOR = "assistant_axis"
 STRENGTH = 12.0
@@ -68,7 +69,7 @@ def test_steering_only_touches_last_prompt_position_onward(agent):
     # before the steering hook (registration order) and see unsteered output.
     layer = agent.registry.get(VECTOR).layer + 1
     captured = []
-    h = agent.model.model.layers[layer].register_forward_hook(
+    h = decoder_layers(agent.model)[layer].register_forward_hook(
         lambda m, i, o: captured.append((o[0] if isinstance(o, tuple) else o)[0].float().clone()))
     try:
         with torch.inference_mode():
@@ -135,7 +136,7 @@ def test_residual_norm_matches_generated_tokens(agent):
     n = inputs.input_ids.shape[1]
     out = agent._generate_ids(inputs, 40, temperature=0, top_p=1.0)
     captured = {}
-    handle = agent.model.model.layers[layer].register_forward_hook(
+    handle = decoder_layers(agent.model)[layer].register_forward_hook(
         lambda m, i, o: captured.__setitem__("h", (o[0] if isinstance(o, tuple) else o)[0].float()))
     try:
         with torch.inference_mode():

@@ -9,7 +9,7 @@ Public API:
 
 Quick start:
     from modulo import SteeringAgent
-    agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers
+    agent = SteeringAgent(model, tokenizer)  # HF causal LM, plain or PEFT-wrapped
     result = agent.step(messages)            # -> StepResult
     messages += [{"role": "assistant", "content": result.raw_output}]
     messages += result.tool_messages()       # tool results back to the model

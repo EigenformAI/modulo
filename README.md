@@ -42,7 +42,7 @@ Probably not well. When we tested this, models said a vector had worked about as
 ```python
 from modulo import SteeringAgent
 
-agent = SteeringAgent(model, tokenizer)  # HF causal LM with model.model.layers (Llama/Qwen/Mistral-style)
+agent = SteeringAgent(model, tokenizer)  # HF causal LM (Llama/Qwen/Mistral-style), plain or PEFT-wrapped
 result = agent.step(messages)  # -> StepResult(prose, raw_output, tool_calls, tool_results, ...)
 messages += [{"role": "assistant", "content": result.raw_output}]
 messages += result.tool_messages()  # tool results back to the model
