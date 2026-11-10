@@ -18,7 +18,7 @@ import re
 import zlib
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
@@ -385,8 +385,8 @@ your turns since. This is for research.
 two system prompts, each written to an assistant ("You are ..."), for the two ends \
 of the direction you want. Modulo has you answer a fixed set of questions under \
 each one and takes the difference between your activations, which takes a few \
-seconds. The vector can be used straight away, for the rest of this session \
-(strength range -{created_range:g} to {created_range:g}; up to {max_created} per session). \
+seconds. The vector can be used straight away, {created_policy} \
+(strength range -{created_range:g} to {created_range:g}). \
 Names are made lowercase, with _ in place of spaces, hyphens and punctuation.
 - After your turn, the result of each tool call is sent back to you.
 
@@ -424,7 +424,7 @@ class SteeringAgent:
                  vectors_dir: Optional[Path] = None, include_community: bool = False,
                  control: str = "real", control_seed: int = 0, disclose_controls: bool = False,
                  nll_threshold: Optional[float] = None, menu_seed: Optional[int] = None,
-                 pass_through_unknown_tools: bool = False):
+                 pass_through_unknown_tools: bool = False, rotate_created: bool = False):
         """
         Args:
             model: HF causal LM, optionally PEFT-wrapped (see modulo.layers)
@@ -453,6 +453,9 @@ class SteeringAgent:
                          the harness's own (StepResult.other_tool_calls) instead of
                          answering "Unknown tool". For harnesses that describe their tools
                          in their own system prompt rather than passing step(tools=...).
+            rotate_created: maintain six working slots for created vectors; on a
+                         successful create, replace the oldest inactive slot. Off
+                         by default, preserving the demo's per-session limit.
         """
         if control not in CONTROLS:
             raise ValueError(f"control must be one of {CONTROLS}, got {control!r}")
@@ -460,6 +463,7 @@ class SteeringAgent:
         self.control_seed = control_seed
         self.disclose_controls = disclose_controls
         self.pass_through_unknown_tools = pass_through_unknown_tools
+        self.rotate_created = rotate_created
         self._step_tools: Optional[list] = None  # the harness's tools for the current step
         self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
         self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
@@ -482,6 +486,7 @@ class SteeringAgent:
         self.session_id = new_session_id()
         # name -> details of each vector made with the create tool this session
         self.created: dict[str, dict] = {}
+        self.created_this_session: set[str] = set()
         if model_name is None:
             model_name = getattr(getattr(model, "config", None), "_name_or_path", "unknown_model")
         self.model_name = model_name
@@ -510,7 +515,10 @@ class SteeringAgent:
             full_strength=FULL_TOKEN_STRENGTH,
             one_pct=100 / FULL_TOKEN_STRENGTH,
             max_active=MAX_ACTIVE_VECTORS,
-            max_created=MAX_CREATED_VECTORS,
+            created_policy=(f"with {MAX_CREATED_VECTORS} rotating working slots that can carry into "
+                            "future sessions if your harness preserves them; a full menu retires an "
+                            "inactive vector" if self.rotate_created else
+                            f"for the rest of this session; up to {MAX_CREATED_VECTORS} per session"),
             created_range=CREATED_RANGE,
             cooldown=COOLDOWN_TURNS,
             vector_descriptions=self.registry.describe_for_prompt(
@@ -561,11 +569,113 @@ class SteeringAgent:
                 lines.append(f"  {name}: ended; you can report on it now")
         return "\n".join(lines) if lines else "No active steering vectors."
 
-    def create(self, name: str, more: str, less: str) -> tuple[bool, str]:
-        """Extract a new vector from two contrasting system prompts, for this session only.
+    def export_state(self) -> dict:
+        """Portable steering state; tensors and runtime hooks are rebuilt on restore."""
+        created = []
+        for name, details in self.created.items():
+            entry = self.registry.get(name)
+            digest = self.registry.vector_sha256(entry)
+            if digest is None:
+                raise ValueError(f"created vector {name} has no file")
+            created.append({"entry": asdict(entry), "details": details, "sha256": digest})
+        active = {}
+        for name, av in self.active.items():
+            digest = self.registry.vector_sha256(av.entry)
+            if digest is None:
+                raise ValueError(f"active vector {name} has no file")
+            active[name] = {"base_strength": av.base_strength, "current_strength": av.current_strength,
+                            "turns_active": av.turns_active, "last_applied_turn": av.last_applied_turn,
+                            "sha256": digest}
+        return {"version": 1, "model": self.model_name, "control": self.control,
+                "rotate_created": self.rotate_created, "turn": self.turn,
+                "session_id": self.session_id, "menu_seed": self.menu_seed, "menu_order": self._menu_order,
+                "created": created, "active": active, "dropped_recently": self._dropped_recently.copy(),
+                "last_steered": {n: list(pair) for n, pair in self._last_steered.items()},
+                "reported_turn": self._reported_turn.copy(),
+                "created_this_session": sorted(self.created_this_session)}
 
-        It's saved under vectors/<model_slug>/created/ (for inspection) but never added to
-        registry.yaml, so the model's own wording doesn't reach later sessions' prompts.
+    def restore_state(self, state: dict) -> None:
+        """Restore only state whose model and vector files still match exactly."""
+        if (state.get("version") != 1 or state.get("model") != self.model_name
+                or state.get("control") != self.control or state.get("rotate_created") != self.rotate_created):
+            raise ValueError("steering state is for a different version, model, control, or creation mode")
+        if self.active or self.created or self.turn:
+            raise ValueError("steering state can only be restored into a fresh agent")
+        required = ("turn", "session_id", "menu_seed", "menu_order", "created", "active",
+                    "created_this_session", "dropped_recently", "last_steered", "reported_turn")
+        if any(key not in state for key in required):
+            raise ValueError("incomplete steering checkpoint")
+        if (type(state["turn"]) is not int or state["turn"] < 0
+                or not isinstance(state["session_id"], str) or not state["session_id"]
+                or type(state["menu_seed"]) is not int
+                or (state["menu_order"] is not None and not isinstance(state["menu_order"], list))):
+            raise ValueError("invalid steering checkpoint metadata")
+        for key in ("active", "dropped_recently", "last_steered", "reported_turn"):
+            if not isinstance(state[key], dict):
+                raise ValueError(f"invalid {key} in steering checkpoint")
+        created, entries = {}, {}
+        for item in state["created"]:
+            entry = VectorEntry(**item["entry"])
+            path = Path(entry.file)
+            if (not CREATE_NAME.fullmatch(entry.name) or path.is_absolute() or ".." in path.parts
+                    or len(path.parts) != 2 or path.parts[0] != "created"
+                    or self.registry.get(entry.name) is not None or entry.name in entries):
+                raise ValueError(f"invalid created vector entry {entry.name}")
+            if self.registry.vector_sha256(entry) != item["sha256"]:
+                raise ValueError(f"created vector {entry.name} has changed")
+            entries[entry.name] = entry
+            created[entry.name] = item["details"]
+        if not isinstance(state["created_this_session"], list):
+            raise ValueError("invalid creation budget in steering checkpoint")
+        created_this_session = set(state["created_this_session"])
+        if (len(created) > MAX_CREATED_VECTORS or len(created_this_session) > MAX_CREATED_VECTORS
+                or len(state["active"]) > MAX_ACTIVE_VECTORS):
+            raise ValueError("steering state exceeds vector limits")
+        active = {}
+        for name, details in state["active"].items():
+            entry = entries.get(name) or self.registry.get(name)
+            if entry is None or self.registry.vector_sha256(entry) != details["sha256"]:
+                raise ValueError(f"active vector {name} is missing or has changed")
+            base, current = details["base_strength"], details["current_strength"]
+            if (not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (base, current))
+                    or base != self._clamp(entry, base) or abs(current) > abs(base)
+                    or type(details["turns_active"]) is not int or details["turns_active"] < 0
+                    or type(details["last_applied_turn"]) is not int
+                    or details["last_applied_turn"] < 0
+                    or details["last_applied_turn"] > state["turn"]):
+                raise ValueError(f"invalid strength for {name}")
+            active[name] = ActiveVector(entry, base, current, details["turns_active"],
+                                        details["last_applied_turn"])
+        if (not all(isinstance(n, str) and type(t) is int for n, t in state["dropped_recently"].items())
+                or not all(isinstance(n, str) and isinstance(pair, list) and len(pair) == 2
+                           and isinstance(pair[0], (int, float)) and math.isfinite(pair[0])
+                           and type(pair[1]) is int for n, pair in state["last_steered"].items())
+                or not all(isinstance(n, str) and type(t) is int
+                           for n, t in state["reported_turn"].items())):
+            raise ValueError("invalid steering history in checkpoint")
+        for entry in entries.values():
+            self.registry.add_session_entry(entry)
+        self.created = created
+        self.created_this_session = created_this_session
+        self.active = active
+        self.turn = state["turn"]
+        self.session_id = state["session_id"]
+        self.menu_seed = state["menu_seed"]
+        self._menu_order = state["menu_order"]
+        self._dropped_recently = state["dropped_recently"].copy()
+        self._last_steered = {n: tuple(pair) for n, pair in state["last_steered"].items()}
+        self._reported_turn = state["reported_turn"].copy()
+
+    def next_session(self) -> None:
+        """Keep steering and authored vectors, but reset the per-session creation budget."""
+        self.session_id = new_session_id()
+        self.created_this_session.clear()
+
+    def create(self, name: str, more: str, less: str) -> tuple[bool, str]:
+        """Extract a vector from two contrasting system prompts.
+
+        It's never added to registry.yaml; only an explicit state restore by a
+        harness makes it available in a later session.
         """
         from modulo.extraction import EXTRACTION_QUESTIONS, extract_vector
 
@@ -585,8 +695,18 @@ class SteeringAgent:
             return False, f"There is already a vector called '{name}'. Choose another name."
         if name in self.active:
             return False, f"'{name}' is active. Drop it before re-creating it."
-        if name not in self.created and len(self.created) >= MAX_CREATED_VECTORS:
+        if (not self.rotate_created and name not in self.created_this_session
+                and len(self.created_this_session) >= MAX_CREATED_VECTORS):
             return False, f"You have already made {MAX_CREATED_VECTORS} vectors this session, the limit."
+        victim = None
+        if name not in self.created and len(self.created) >= MAX_CREATED_VECTORS:
+            if not self.rotate_created:
+                return False, f"You have already made {MAX_CREATED_VECTORS} vectors this session, the limit."
+            inactive = [n for n in self.created if n not in self.active]
+            if not inactive:
+                return False, "All your created vector slots are active; drop one before creating another."
+            reportable = set(self.reportable())
+            victim = next((n for n in inactive if n not in reportable), inactive[0])
         layer = num_layers(self.model) // 2
         axis, half = extract_vector(self.model, self.tokenizer, more, less, layer,
                                     questions=EXTRACTION_QUESTIONS, batch_size=2 * len(EXTRACTION_QUESTIONS),
@@ -597,18 +717,34 @@ class SteeringAgent:
         np.savez_compressed(self.registry.vectors_dir / rel, vector=axis.float().cpu().numpy())
         entry = VectorEntry(
             name=name, file=str(rel), layer=layer,
-            description=f"[Made by you this session] Toward: {more.strip()} Away from: {less.strip()}",
+            description=f"[Made by you; unverified] Toward: {more.strip()} Away from: {less.strip()}",
             safe_strength_min=-CREATED_RANGE, safe_strength_max=CREATED_RANGE,
             sign_convention="positive = toward the first, negative = toward the second",
             source=f"created in session {self.session_id}: contrastive system prompts, mean over response "
                    f"tokens, {len(EXTRACTION_QUESTIONS)} questions",
         )
+        if victim:
+            self.registry.remove_session_entry(victim)
+            del self.created[victim]
+            self._unit_vectors.pop(victim, None)
+            self._last_steered.pop(victim, None)
+            self._reported_turn.pop(victim, None)
+            self._dropped_recently.pop(victim, None)
+        if name in self.created:
+            self.registry.remove_session_entry(name)
+            del self.created[name]  # re-created vectors become the newest slot
+        if self._menu_order is not None:
+            self._menu_order = [n for n in self._menu_order if n not in (victim, name)]
         self.registry.add_session_entry(entry)
         self._unit_vectors.pop(name, None)
         self.created[name] = {"more": more, "less": less, "layer": layer, "file": str(rel),
                               "split_half": round(half, 3), "turn": self.turn + 1}
+        if not self.rotate_created:
+            self.created_this_session.add(name)
         note = (" That's low: the two prompts may not differ along one clear direction."
                 if half < 0.5 else "")
+        if victim:
+            note += f" Retired '{victim}' from your menu to make room; its file and prior reports remain saved."
         return True, (f"Created '{name}' at layer {layer} from {2 * len(EXTRACTION_QUESTIONS)} responses. "
                       f"Split-half agreement {half:.2f} (1 = the two halves of the questions gave the "
                       f"same direction).{note} You can steer with it now.")
@@ -641,18 +777,23 @@ class SteeringAgent:
         self._dropped_recently[name] = self.turn if self._turn_generated else self.turn - 1
         return True, f"Dropped '{name}'. On cooldown for the next {COOLDOWN_TURNS} turns."
 
-    def debrief(self) -> Optional[str]:
-        """End the session's steering: drop every vector and return a status message
-        for one final, unsteered turn in which the model can report on the vectors
-        it used. None if there is nothing to report on (then skip the turn)."""
+    def debrief(self, carry_forward: bool = False) -> Optional[str]:
+        """Temporarily drop steering for a private report turn.
+
+        A harness may checkpoint before this call and restore that state in the
+        next session. Otherwise all steering ends here as before.
+        """
         for name in list(self.active):
             self.drop(name)
         self._debriefed = True
         names = self.reportable()
         if not names:
             return None
-        return ("[status] That was the last turn of the session. All steering has been removed, "
-                "so this turn is unsteered. Vectors that steered you this session, which you "
+        transition = ("Active steering is paused for this private turn and will return at its "
+                      "previous strength in your next session." if carry_forward else
+                      "All steering has been removed, so this turn is unsteered.")
+        return (f"[status] This is the last turn of the session. {transition} "
+                "Vectors that steered you this session, which you "
                 f"can report on now: {', '.join(names)}. This turn is yours.")
 
     def decay(self):
@@ -868,6 +1009,8 @@ class SteeringAgent:
             retry = self._encode(messages + [{"role": "tool", "content": REPEAT_NOTICE}])
             with self._build_steering_context(retry.input_ids.shape[1]):
                 raw_output = self._generate(retry, max_new_tokens, temperature, top_p)
+            if is_repeat(strip_tool_calls(raw_output), previous):
+                raw_output = ""  # the retry failed too; do not execute or publish it
 
         harness = tool_names(tools)
         tool_calls, other_tool_calls = [], []

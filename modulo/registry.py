@@ -180,6 +180,13 @@ class VectorRegistry:
         self._index_names.discard(entry.name)
         self._session_names.add(entry.name)
 
+    def remove_session_entry(self, name: str) -> None:
+        """Retire an agent-made vector from the menu without deleting its evidence file."""
+        if name not in self._session_names:
+            raise ValueError(f"{name} is not an agent-made vector")
+        self.entries.pop(name, None)
+        self._session_names.remove(name)
+
     @property
     def session_names(self) -> set[str]:
         return set(self._session_names)

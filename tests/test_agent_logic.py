@@ -153,6 +153,79 @@ def test_repeated_turn_regenerates_with_notice(agent, monkeypatch):
     assert [m["content"] for m in result.tool_messages()] == [REPEAT_NOTICE]
 
 
+def test_repeated_retry_is_discarded(agent, monkeypatch):
+    class FakeInputs:
+        def __init__(self, msgs):
+            self.msgs = msgs
+            self.input_ids = torch.zeros(1, 1)
+
+    outputs = [STORY, STORY]
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs(msgs))
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    stub_generation(agent, monkeypatch, lambda inputs, *args: outputs.pop(0))
+
+    history = [{"role": "user", "content": "What's new?"},
+               {"role": "assistant", "content": STORY}]
+    result = agent.step(history)
+    assert result.repeated_output == STORY
+    assert result.raw_output == result.prose == ""
+    assert not result.tool_calls and not result.other_tool_calls
+    assert [m["content"] for m in result.tool_messages()] == [REPEAT_NOTICE]
+
+
+def test_checkpoint_restores_active_and_created_vectors(agent, tmp_path):
+    torch.save(torch.ones(8), tmp_path / "a.pt")
+    created_file = tmp_path / "created" / "session_made.pt"
+    created_file.parent.mkdir()
+    torch.save(torch.ones(8), created_file)
+    made = VectorEntry(name="made", file="created/session_made.pt", layer=0)
+    agent.registry.add_session_entry(made)
+    agent.created["made"] = {"more": "curious", "less": "bored", "file": made.file}
+    assert agent.apply("made", 3)[0]
+    agent.decay()
+    state = agent.export_state()
+    restored = SteeringAgent(None, None, model_name="test/model",
+                             registry=StubRegistry(vectors_dir=tmp_path))
+    restored.restore_state(state)
+    assert restored.registry.get("made") == made
+    assert restored.created == agent.created
+    assert restored.active["made"].current_strength == agent.active["made"].current_strength
+    assert restored.turn == agent.turn and restored.session_id == agent.session_id
+    restored.decay()
+    assert restored.active["made"].current_strength < agent.active["made"].current_strength
+
+
+def test_checkpoint_refuses_wrong_model_or_changed_vector(agent, tmp_path):
+    torch.save(torch.ones(8), tmp_path / "a.pt")
+    assert agent.apply("a", 4)[0]
+    state = agent.export_state()
+    wrong = SteeringAgent(None, None, model_name="other/model",
+                          registry=StubRegistry(vectors_dir=tmp_path))
+    with pytest.raises(ValueError, match="different"):
+        wrong.restore_state(state)
+    torch.save(torch.zeros(8), tmp_path / "a.pt")
+    fresh = SteeringAgent(None, None, model_name="test/model",
+                          registry=StubRegistry(vectors_dir=tmp_path))
+    with pytest.raises(ValueError, match="changed"):
+        fresh.restore_state(state)
+    assert not fresh.active
+
+
+def test_checkpoint_is_atomic_when_metadata_is_incomplete(agent, tmp_path):
+    (tmp_path / "created").mkdir(exist_ok=True)
+    torch.save(torch.ones(8), tmp_path / "created" / "thought.pt")
+    entry = VectorEntry(name="thought", file="created/thought.pt", layer=0)
+    agent.registry.add_session_entry(entry)
+    agent.created["thought"] = {"file": entry.file}
+    state = agent.export_state()
+    del state["reported_turn"]
+    fresh = SteeringAgent(None, None, model_name="test/model",
+                          registry=StubRegistry(vectors_dir=tmp_path))
+    with pytest.raises(ValueError, match="incomplete"):
+        fresh.restore_state(state)
+    assert not fresh.created and not fresh.registry.session_names
+
+
 # --- auto-extraction ---
 
 def test_missing_starter_vectors_extracted_alongside_index_vectors(tmp_path, monkeypatch):
@@ -626,7 +699,7 @@ def test_create_makes_a_session_only_vector(creator, tmp_path):
     assert creator._calls[0][3]["batch_size"] and creator._calls[0][3]["return_halves"]
     entry = creator.registry.get("wonder")
     assert entry.layer == 4 and (tmp_path / entry.file).exists() and entry.safe_strength_max == 10
-    assert "wonder: [Made by you this session] Toward: You are full of wonder." in creator.build_system_prompt()
+    assert "wonder: [Made by you; unverified] Toward: You are full of wonder." in creator.build_system_prompt()
     assert creator.apply("wonder", 6)[0] and creator.created["wonder"]["split_half"] == 0.85
     creator.registry.registry_path = tmp_path / "registry.yaml"
     creator.registry.save()
@@ -649,6 +722,30 @@ def test_create_rejects_bad_requests(creator):
     creator.apply("v0", 3)
     assert "Drop it" in create(concept="v0", more="x3", less="y3").message
     assert not creator._calls[-1][0] == "x3"
+
+
+def test_created_slots_rotate_without_evicting_active_vectors(creator, tmp_path):
+    creator.rotate_created = True
+    for i in range(6):
+        assert creator.create(f"v{i}", "toward", "away")[0]
+    first_file = creator.registry.get("v1").file
+    assert creator.apply("v0", 4)[0]
+    ok, message = creator.create("v6", "toward", "away")
+    assert ok and "Retired 'v1'" in message
+    assert "v1" not in creator.created and creator.registry.get("v1") is None
+    assert "v0" in creator.active and creator.registry.get("v0") is not None
+    assert len(creator.created) == 6 and (tmp_path / first_file).exists()
+    state = creator.export_state()
+    restored = SteeringAgent(_FakeModel(), None, model_name="test/model", rotate_created=True,
+                             registry=StubRegistry(vectors_dir=tmp_path))
+    restored.restore_state(state)
+    assert "v6" in restored.created and "v1" not in restored.created
+    assert "v0" in restored.active
+    for i in range(7, 12):
+        assert restored.create(f"v{i}", "toward", "away")[0]
+    assert len(restored.created) == 6
+    assert restored.create("v12", "toward", "away")[0]
+    assert len(restored.created) == 6
 
 
 def test_names_with_hyphens_and_punctuation_are_normalized(creator):
