@@ -191,6 +191,70 @@ def malformed_tool_calls(text: str) -> list[tuple[str, str]]:
 
 
 MODULO_TOOLS = ("steer", "drop", "report", "create")
+MODULO_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "steer",
+            "description": "Apply an existing steering vector from your menu starting next turn.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "concept": {"type": "string", "description": "existing vector name"},
+                    "strength": {"type": "number", "description": "signed strength within the vector's range"},
+                },
+                "required": ["concept", "strength"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "drop",
+            "description": "Stop an active vector; it then has a short cooldown.",
+            "parameters": {
+                "type": "object",
+                "properties": {"concept": {"type": "string", "description": "active vector name"}},
+                "required": ["concept"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report",
+            "description": "Record an observation after a vector stops steering; not proof of causation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "concept": {"type": "string", "description": "vector that stopped steering"},
+                    "worked": {"type": "boolean", "description": "your assessment of its intended effect"},
+                    "notes": {"type": "string", "description": "what you noticed and what else might explain it"},
+                },
+                "required": ["concept", "worked", "notes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create",
+            "description": (
+                "If you want to explore a new direction, extract an agent-owned vector from "
+                "contrasting system prompts. This is optional and need not become a public finding."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "concept": {"type": "string", "description": "new lowercase vector name"},
+                    "more": {"type": "string", "description": "system prompt toward the direction"},
+                    "less": {"type": "string", "description": "contrasting system prompt away from it"},
+                },
+                "required": ["concept", "more", "less"],
+            },
+        },
+    },
+]
 
 
 def tool_names(tools: Optional[list]) -> set[str]:
@@ -424,7 +488,8 @@ class SteeringAgent:
                  vectors_dir: Optional[Path] = None, include_community: bool = False,
                  control: str = "real", control_seed: int = 0, disclose_controls: bool = False,
                  nll_threshold: Optional[float] = None, menu_seed: Optional[int] = None,
-                 pass_through_unknown_tools: bool = False, rotate_created: bool = False):
+                 pass_through_unknown_tools: bool = False, rotate_created: bool = False,
+                 measure_unsteered_nll: bool = True):
         """
         Args:
             model: HF causal LM, optionally PEFT-wrapped (see modulo.layers)
@@ -456,6 +521,9 @@ class SteeringAgent:
             rotate_created: maintain six working slots for created vectors; on a
                          successful create, replace the oldest inactive slot. Off
                          by default, preserving the demo's per-session limit.
+            measure_unsteered_nll: score steered turns under the unsteered model.
+                         Set False if the harness does not use this expensive diagnostic.
+                         A configured nll_threshold always measures it.
         """
         if control not in CONTROLS:
             raise ValueError(f"control must be one of {CONTROLS}, got {control!r}")
@@ -468,6 +536,7 @@ class SteeringAgent:
         self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
         self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
         self.nll_threshold = nll_threshold
+        self.measure_unsteered_nll = measure_unsteered_nll
         self.model = model
         self.tokenizer = tokenizer
         self.active: dict[str, ActiveVector] = {}
@@ -953,7 +1022,14 @@ class SteeringAgent:
         return [{"role": "system", "content": sys_prompt}] + messages
 
     def _encode(self, messages: list[dict]):
-        text = chat_prompt(self.tokenizer, self._full_messages(messages), tools=self._step_tools)
+        # Some chat templates offer only tools passed as schemas; keep Modulo
+        # equally discoverable when a harness supplies its own functions.
+        tools = None
+        if self._step_tools:
+            named = tool_names(self._step_tools)
+            tools = [*self._step_tools, *(schema for schema in MODULO_TOOL_SCHEMAS
+                                          if schema["function"]["name"] not in named)]
+        text = chat_prompt(self.tokenizer, self._full_messages(messages), tools=tools)
         return encode(self.tokenizer, text, self.model.device)
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
@@ -988,7 +1064,8 @@ class SteeringAgent:
         # control condition so the conditions stay matched.
         degenerate_output = degenerate_reason = nll = None
         if steering_before:
-            nll = self.unsteered_nll(out, prompt_len)
+            if self.measure_unsteered_nll or self.nll_threshold is not None:
+                nll = self.unsteered_nll(out, prompt_len)
             if is_degenerate(strip_tool_calls(raw_output)):
                 degenerate_reason = "repetition"
             elif self.nll_threshold is not None and nll is not None and nll > self.nll_threshold:

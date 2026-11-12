@@ -3,6 +3,7 @@
 No model is loaded; SteeringAgent runs against a stub registry.
 """
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -614,12 +615,45 @@ def test_step_logs_nll_and_system_prompt_on_steered_turns_only(agent, monkeypatc
     assert steered.degenerate_output is None  # no threshold set: NLL is only logged
 
 
+def test_harness_tools_do_not_hide_modulo_tools_in_chat_template(agent, monkeypatch):
+    seen = []
+    agent.model = SimpleNamespace(device="cpu")
+    monkeypatch.setattr(A, "chat_prompt", lambda _tok, _msgs, tools=None: seen.append(tools) or "")
+    monkeypatch.setattr(A, "encode", lambda *_args: None)
+    agent._step_tools = [{"type": "function", "function": {"name": "discord"}}]
+    agent._encode([{"role": "user", "content": "hi"}])
+    assert [tool["function"]["name"] for tool in seen[-1]] == [
+        "discord", "steer", "drop", "report", "create",
+    ]
+    agent._step_tools = None
+    agent._encode([{"role": "user", "content": "hi"}])
+    assert seen[-1] is None  # standalone Modulo keeps its existing chat template
+
+
+def test_steered_turn_can_skip_unused_nll_without_losing_repetition_guard(agent, monkeypatch):
+    class FakeInputs:
+        input_ids = torch.zeros(1, 1)
+
+    outputs = [COLLAPSED[0], "Back to normal."]
+    agent.measure_unsteered_nll = False
+    monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
+    monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
+    stub_generation(agent, monkeypatch, lambda *args: outputs.pop(0))
+    monkeypatch.setattr(agent, "unsteered_nll", lambda *args: pytest.fail("unused NLL was measured"))
+    agent.apply("a", 5.0)
+    result = agent.step([{"role": "user", "content": "hi"}])
+    assert result.unsteered_nll is None
+    assert result.degenerate_reason == "repetition"
+    assert result.raw_output == "Back to normal."
+
+
 def test_nll_threshold_counts_as_degenerate(agent, monkeypatch):
     class FakeInputs:
         input_ids = torch.zeros(1, 1)
 
     outputs = ["Colour sideways the of inward eleven.", "Back to normal."]
     agent.nll_threshold = 4.0
+    agent.measure_unsteered_nll = False  # a threshold still forces measurement
     monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
     monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
     stub_generation(agent, monkeypatch, lambda *a: outputs.pop(0), nll=5.2)
