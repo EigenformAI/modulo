@@ -547,6 +547,7 @@ class SteeringAgent:
         self._turn_generated = False
         self._unit_vectors: dict[str, torch.Tensor] = {}
         self._residual_norms: dict[int, float] = {}
+        self._calibration_key: Optional[str] = None
         # name -> (strength, turn) of the most recent generation each vector steered
         self._last_steered: dict[str, tuple[float, int]] = {}
         # name -> turn of the latest report on it (a vector is reportable again once re-steered)
@@ -925,6 +926,93 @@ class SteeringAgent:
                 h = captured["h"][1:]
             self._residual_norms[layer] = h.norm(dim=-1).median().item()
         return self._residual_norms[layer]
+
+    def clear_calibration(self) -> None:
+        """Forget all measured/imported norms. Subsequent use calibrates normally."""
+        self._residual_norms.clear()
+        self._calibration_key = None
+
+    def _calibration_profile(self) -> dict:
+        # Deliberately not a weight fingerprint. The operator key covers everything
+        # not checked here, including tokenizer, adapters and numerical settings.
+        import transformers
+
+        if any(module.training for module in self.model.modules()):
+            raise ValueError("Calibration reuse requires all model modules in eval mode.")
+        return {
+            "recipe": [1, "median-generated-l2-full-replay", CALIBRATION_PROMPT, CALIBRATION_TOKENS],
+            "model": self.model_name,
+            "class": f"{type(self.model).__module__}.{type(self.model).__qualname__}",
+            "layers": len(decoder_layers(self.model)),
+            "hidden_size": getattr(self.model.config, "hidden_size", None),
+            "input_device": str(self.model.device),
+            "placements": [list(p) for p in sorted({(str(t.dtype), str(t.device))
+                           for t in (*self.model.parameters(), *self.model.buffers())})],
+            "torch": str(torch.__version__),
+            "transformers": transformers.__version__,
+        }
+
+    def export_calibration(self, *, key: str) -> dict:
+        """Return a detached JSON-compatible record of already measured norms.
+
+        key is the operator's identity for exact weights/tokenizer/adapters and
+        execution settings. It is an assertion, not automatic mutation detection.
+        Does not calibrate missing layers. See README.md for the reuse contract.
+        """
+        if self._calibration_key is not None and key != self._calibration_key:
+            raise ValueError("Clear calibration before changing its operator key.")
+        record = {"schema": 1, "key": key, "profile": self._calibration_profile(),
+                  "norms": {str(k): v for k, v in self._residual_norms.items()}}
+        self._validate_calibration(record, key=key, profile=record["profile"])
+        self._calibration_key = key
+        return record
+
+    @staticmethod
+    def _validate_calibration(record, *, key, profile) -> dict[int, float]:
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Calibration key must be a nonempty operator identity string.")
+        if (not isinstance(record, dict) or set(record) != {"schema", "key", "profile", "norms"}
+                or type(record["schema"]) is not int or record["schema"] != 1):
+            raise ValueError("Invalid calibration record schema.")
+        if type(record["key"]) is not str or record["key"] != key:
+            raise ValueError("Calibration operator key mismatch.")
+        try:
+            matches = json.dumps(record["profile"], sort_keys=True, allow_nan=False) == json.dumps(profile, sort_keys=True)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ValueError("Invalid calibration profile.") from error
+        if not matches:
+            raise ValueError("Calibration profile mismatch.")
+        norms = record["norms"]
+        if not isinstance(norms, dict):
+            raise ValueError("Calibration norms must be a layer-to-scalar dictionary.")
+        checked = {}
+        valid_layers = {str(i) for i in range(profile["layers"])}
+        for layer, value in norms.items():
+            if (not isinstance(layer, str) or layer not in valid_layers
+                    or type(value) not in (int, float)):
+                raise ValueError("Calibration norms require valid layer strings and positive finite numbers.")
+            try:
+                scalar = float(value)
+            except OverflowError as error:
+                raise ValueError("Calibration norm is outside the finite scalar range.") from error
+            if not math.isfinite(scalar) or scalar <= 0:
+                raise ValueError("Calibration norms must be positive and finite.")
+            checked[int(layer)] = scalar
+        return checked
+
+    def import_calibration(self, record: Optional[dict], *, key: str) -> None:
+        """Replace all norms with a matching operator-owned record; None is a miss.
+
+        Malformed/mismatched records raise ValueError and leave all norms empty.
+        Missing layers calibrate normally. Call only between steps on unchanged
+        models; clear before any mutation and use a new key. Tracebacks are not
+        redacted and can retain owners until the caller releases them.
+        """
+        self.clear_calibration()
+        if record is not None:
+            self._residual_norms.update(self._validate_calibration(
+                record, key=key, profile=self._calibration_profile()))
+            self._calibration_key = key
 
     def _build_steering_context(self, prompt_len: int):
         if not self.active or self.control == "sham":
