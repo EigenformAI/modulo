@@ -374,9 +374,31 @@ def _reportable(agent, name, strength=5.0):
 
 def test_report_parses_string_booleans(agent):
     _reportable(agent, "b")
-    agent._execute(ToolCall("report", {"concept": "b", "worked": "false"}, ""))
-    agent._execute(ToolCall("report", {"concept": "b", "worked": "true"}, ""))
+    assert agent._execute(ToolCall("report", {"concept": "b", "worked": "false"}, "")).ok
+    _reportable(agent, "b")
+    assert agent._execute(ToolCall("report", {"concept": "b", "worked": "true"}, "")).ok
     assert [r["worked"] for r in read_reports(agent.registry.reports_path)] == [False, True]
+
+
+def test_duplicate_report_is_rejected_after_checkpoint_restore(agent):
+    _reportable(agent, "a")
+    call = ToolCall("report", {"concept": "a", "worked": True}, "")
+    assert agent._execute(call).ok
+    assert agent.reportable() == []
+    assert not agent._execute(call).ok
+    assert len(read_reports(agent.registry.reports_path)) == 1
+
+    restored = SteeringAgent(model=None, tokenizer=None, model_name="test/model",
+                             registry=StubRegistry(vectors_dir=agent.registry.vectors_dir))
+    restored.restore_state(agent.export_state())
+    duplicate = restored._execute(call)
+    assert not duplicate.ok and "already reported" in duplicate.message
+    assert len(read_reports(agent.registry.reports_path)) == 1
+
+    _reportable(restored, "a")
+    assert restored.reportable() == ["a"]
+    assert restored._execute(call).ok
+    assert len(read_reports(agent.registry.reports_path)) == 2
 
 
 def test_tool_messages_include_failures_and_degeneration():
@@ -423,6 +445,18 @@ def test_report_is_saved_with_steering_context(agent, monkeypatch):
     assert agent.reportable() == [] and "report on it" not in agent.status()
     assert r["session_id"] == agent.session_id
     assert len(r["vector_sha256"]) == 64
+
+
+def test_repeated_report_tool_call_does_not_append_another_report(agent, monkeypatch):
+    (agent.registry.vectors_dir / "a.pt").write_bytes(b"vector bytes")
+    agent.apply("a", 5.0)
+    _steered_step(agent, monkeypatch, "steered")
+    _steered_step(agent, monkeypatch, '{"name": "drop", "arguments": {"concept": "a"}}')
+    assert _steered_step(agent, monkeypatch, REPORT_A).tool_results[0].ok
+    repeated = _steered_step(agent, monkeypatch, REPORT_A)
+    assert not repeated.tool_results[0].ok
+    assert "already reported" in repeated.tool_results[0].message
+    assert len(read_reports(agent.registry.reports_path)) == 1
 
 
 def test_reports_wait_until_the_vector_has_stopped(agent, monkeypatch):

@@ -605,12 +605,13 @@ class SteeringAgent:
                     f"you (it decays away or you drop it).")
         if last[1] >= self.turn:
             return f"'{name}' steered this turn. You can report on it from your next turn."
+        if self._reported_turn.get(name, -1) > last[1]:
+            return f"'{name}' was already reported since it last steered you. Steer it again for a new report."
         return None
 
     def reportable(self) -> list[str]:
         """Vectors that have stopped steering and haven't been reported on since."""
-        return [n for n, (_, t) in self._last_steered.items()
-                if self._report_refusal(n) is None and self._reported_turn.get(n, -1) <= t]
+        return [n for n in self._last_steered if self._report_refusal(n) is None]
 
     def menu_order(self) -> list[str]:
         """The vectors in the order the prompt lists them: shuffled once per session
