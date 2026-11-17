@@ -223,6 +223,9 @@ vec = extract_vector(model, tokenizer,
 ### SteeringAgent methods
 
 - `agent.step(messages, max_new_tokens=300, temperature=0.7, top_p=0.9, tools=None) -> StepResult`
+- `agent.export_calibration(key=...) -> dict` — independent JSON-compatible snapshot of already measured scalar norms; no generation
+- `agent.import_calibration(record, key=...)` — replace all norms from a matching record; `None` clears as a miss
+- `agent.clear_calibration()` — forget imported and locally measured norms without disabling steering
 - `agent.build_system_prompt() -> str` — system prompt describing the steer tool
 - `agent.status() -> str` — active vector status
 - `agent.apply(name, strength) -> (bool, str)` — manually apply a vector
@@ -231,6 +234,18 @@ vec = extract_vector(model, tokenizer,
 - `agent.reportable() -> list[str]` — vectors that have stopped steering and can be reported on
 - `agent.debrief() -> str | None` — end the session's steering; send the returned status as a `tool` message for one last turn
 - `agent.menu_order() -> list[str]` — the order vectors are listed in this session (from `menu_seed`)
+
+**Calibration reuse is opt-in startup reuse, not decode acceleration.** The caller's
+nonempty key asserts complete checkpoint/tokenizer/weight/adapter/execution identity;
+the library's schema, layer, dtype/device and runtime checks are sanity checks, not
+automatic mutation detection. Before changing weights, adapters, tokenizer, dtype,
+device or numerical settings, clear calibration and use a new key. Missing layers
+calibrate normally. Invalid imports raise `ValueError` and leave all norms empty.
+Export cannot relabel a bound key until clear; import itself clears/replaces.
+Only canonical zero-based layers are reusable; negative-index memos cannot export.
+Scalar records hold no live owners and are separate from `export_state()` steering
+checkpoints. Normal tracebacks can retain owners until the caller releases errors.
+See [Reuse calibration across identical model owners](README.md#reuse-calibration-across-identical-model-owners) for the complete record and operator contract.
 
 ### StepResult
 

@@ -50,6 +50,59 @@ messages += result.tool_messages()  # tool results back to the model
 
 If your harness has tools of its own, pass them with `agent.step(messages, tools=[...])`. Calls to them come back unrun in `result.other_tool_calls`. See [AGENTS.md](AGENTS.md#1-as-a-library-for-existing-agent-harnesses).
 
+#### Reuse calibration across identical model owners
+
+Calibration reuse is opt-in and saves startup work, not decoding work. By default,
+each agent measures and memoizes its own residual norms. An operator can keep a
+JSON-compatible scalar record after releasing an agent and its model:
+
+```python
+key = "my-pinned-model-and-tokenizer; pristine; no-adapters; bf16-4090-sdpa-profile-v1"
+agent.residual_norm(layer)  # ordinary calibration, or let the first steered step do it
+record = agent.export_calibration(key=key)  # no extra calibration; json.dumps works
+# Release the old agent/model, then load the exact same model and tokenizer.
+new_agent = SteeringAgent(new_model, new_tokenizer)
+new_agent.import_calibration(record, key=key)
+```
+
+**Your key asserts identity.** Include exact checkpoint and tokenizer revisions
+(including the chat template), weight mutations, adapter revisions/order/scales
+and enabled/merged state, generation configuration, custom code/hooks, and
+numerical/backend/device settings. Distinguish physical GPUs, not just `cuda:0`.
+Use a stable key for identical pristine reloads and a new unique key for mutations.
+Matching keys are not proof of numerical equivalence: validate your execution
+profile before reuse. The library does not hash weights or detect mutations.
+
+The library checks schema/recipe, key equality, model name/class, layer count,
+hidden size, parameter/buffer dtype/device sets, input device, and Torch/Transformers
+versions. Import/export require every model module in evaluation mode. These are
+sanity checks, not complete identity checks. Records are trusted operator data,
+not input from the model or community. A plausible but incorrect scalar cannot
+be detected automatically.
+
+- `export_calibration(key=...)` returns an independent record of measured layers
+  only, possibly empty. Exporting under a different key requires a clear.
+- `import_calibration(record, key=...)` **replaces** the memo. Unknown fields,
+  mismatches, invalid layer IDs, booleans, and nonpositive/nonfinite values raise
+  `ValueError`. Failure leaves the entire memo empty, with no partial import.
+  Norms accept finite positive Python integers/floats with canonical layer strings.
+  Import clears first, so a different matching record/key needs no separate clear.
+- Reusable layers are zero-based (`0` through the last layer). An existing memo
+  measured via Python negative indexing cannot be exported. For reuse, configure
+  vectors with equivalent zero-based indices, clear, and recalibrate those layers.
+- Missing layers still calibrate normally. `import_calibration(None, key=...)`
+  clears the memo as an explicit miss; its key is ignored.
+- Before changing model, tokenizer, adapters, dtype, device, or execution settings,
+  call `clear_calibration()` and use a new key. It clears imported **and** locally
+  measured norms. Recreate the agent when replacing its model. There is no
+  automatic invalidation, concurrency support, or mid-step import/export.
+- To disable reuse, omit imports; clear an existing memo if necessary. Steering
+  remains enabled. Calibration records are separate from steering checkpoints.
+
+Records contain no tensors, models, vectors, KV, or GPU state, and perform no file
+I/O. Ordinary exception tracebacks remain intact and can retain owners/activations;
+release caught errors and their tracebacks before expecting model/GPU collection.
+
 ### As a standalone demo
 
 ```bash
