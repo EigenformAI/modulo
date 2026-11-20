@@ -21,7 +21,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Optional
 
 import torch
 
@@ -122,6 +122,7 @@ class StepResult:
     # Calls to the harness's own tools (step(tools=...), or any non-Modulo tool with
     # pass_through_unknown_tools): not run, left in prose, for the harness to run
     other_tool_calls: list = field(default_factory=list)
+    prompt_tokens: Optional[int] = None
 
     def tool_messages(self) -> list[dict]:
         """Tool results as chat messages (role 'tool'), to append after the assistant turn."""
@@ -532,6 +533,7 @@ class SteeringAgent:
         self.disclose_controls = disclose_controls
         self.pass_through_unknown_tools = pass_through_unknown_tools
         self.rotate_created = rotate_created
+        self._prompt_budget: Optional[int] = None
         self._step_tools: Optional[list] = None  # the harness's tools for the current step
         self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
         self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
@@ -1014,7 +1016,14 @@ class SteeringAgent:
         return torch.nn.functional.cross_entropy(logits, out[0, prompt_len:]).item()
 
     def _full_messages(self, messages: list[dict]) -> list[dict]:
-        sys_prompt = self.build_system_prompt()
+        if self._prompt_budget is None:
+            sys_prompt = self.build_system_prompt()
+        else:
+            sys_prompt = (
+                "Steering changes your activations starting next turn. "
+                "Strengths decay each turn. Report after a vector stops acting. "
+                f"Current steering: {self.status()}"
+            )
         if messages and messages[0].get("role") == "system":
             # Merge the harness's own system prompt; many chat templates reject
             # or mishandle a second system message.
@@ -1026,27 +1035,81 @@ class SteeringAgent:
         # Some chat templates offer only tools passed as schemas; keep Modulo
         # equally discoverable when a harness supplies its own functions.
         tools = None
-        if self._step_tools:
+        if self._step_tools and self._prompt_budget is None:
             named = tool_names(self._step_tools)
             tools = [*self._step_tools, *(schema for schema in MODULO_TOOL_SCHEMAS
                                           if schema["function"]["name"] not in named)]
-        text = chat_prompt(self.tokenizer, self._full_messages(messages), tools=tools)
-        return encode(self.tokenizer, text, self.model.device)
+        full = self._full_messages(messages)
+        if self._prompt_budget is None:
+            return encode(self.tokenizer, chat_prompt(self.tokenizer, full, tools=tools), self.model.device)
+
+        system, history = full[:1], full[1:]
+        # Keep recent assistant outputs with their results. A short opening keeps
+        # the tail renderable on templates that require a user message first.
+        starts = [i for i, item in enumerate(history) if item["role"] in ("user", "assistant")]
+        latest = starts[-1] if starts else 0
+        starts = starts or [0]
+
+        def render(start):
+            tail = []
+            for item in history[start:]:
+                role = item["role"]
+                if role == "assistant" and (not tail or tail[-1]["role"] == "assistant"):
+                    tail.append({"role": "user", "content": "Continue your research."})
+                if role == "user" and tail and tail[-1]["role"] == "user":
+                    tail[-1] = {"role": "user", "content": tail[-1]["content"] + "\n" + item["content"]}
+                else:
+                    tail.append(item)
+            if not tail or tail[0]["role"] != "user":
+                tail.insert(0, {"role": "user", "content": "Continue your research."})
+            return encode(self.tokenizer, chat_prompt(self.tokenizer, system + tail))
+
+        # Search for the longest suffix within the rendered token budget.
+        low, high = 0, len(starts) - 1
+        fitted = None
+        while low <= high:
+            middle = (low + high) // 2
+            inputs = render(starts[middle])
+            if inputs.input_ids.shape[1] <= self._prompt_budget:
+                fitted = inputs
+                high = middle - 1
+            else:
+                low = middle + 1
+        if fitted is not None:
+            return fitted.to(self.model.device)
+        # An unusually large batch of tool results can exceed even one exchange.
+        # Prefer the newest result, including any handle for retrieving its full text.
+        tail = history[latest:]
+        for item in reversed(tail):
+            inputs = encode(self.tokenizer, chat_prompt(self.tokenizer, system + [
+                {"role": "user", "content": "Continue your research."},
+                {"role": "assistant", "content": "Checking the last result."},
+                {"role": "tool", "content": item["content"]},
+            ]))
+            if inputs.input_ids.shape[1] <= self._prompt_budget:
+                return inputs.to(self.model.device)
+        raise ValueError("Mailbox prompt budget is too small for the system prompt and latest result.")
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
-             temperature: float = 0.7, top_p: float = 0.9, tools: Optional[list] = None) -> StepResult:
+             temperature: float = 0.7, top_p: float = 0.9, tools: Optional[list] = None,
+             *, prompt_budget: Optional[int] = None,
+             blocked_tools: Collection[str] = ()) -> StepResult:
         """Run one turn: build prompt, generate (steered), parse tool calls, apply them, decay.
 
         Args:
             messages: conversation history (list of {role, content} dicts)
             max_new_tokens, temperature, top_p: generation params
-            tools: the harness's own tools (JSON schemas or functions, as for
-                apply_chat_template), passed to the chat template. Calls to them are
-                returned in StepResult.other_tool_calls, not run.
+            tools: the harness's own tools (JSON schemas or functions). Calls to
+                them are returned in StepResult.other_tool_calls, not run.
+            prompt_budget: opt into compact steering instructions and a rendered
+                input-token limit. The harness supplies its own tool instructions.
+                Without a budget, schemas are passed to the chat template.
+            blocked_tools: Modulo tool names to reject before execution on this turn.
 
         Returns: StepResult with prose, raw output, tool calls/results, and steering state
         """
         self._step_tools = tools
+        self._prompt_budget = prompt_budget
         full = self._full_messages(messages)
         system_prompt = full[0]["content"]
         inputs = self._encode(messages)
@@ -1096,7 +1159,11 @@ class SteeringAgent:
             mine = tc.name in MODULO_TOOLS or (tc.name not in harness and not self.pass_through_unknown_tools)
             (tool_calls if mine else other_tool_calls).append(tc)
         prose = strip_tool_calls(raw_output, keep={tc.name for tc in other_tool_calls})
-        tool_results = [self._execute(tc) for tc in tool_calls]
+        tool_results = [
+            ToolResult(tc.name, tc.arguments, False, "Unavailable on this recovery turn.")
+            if tc.name in blocked_tools else self._execute(tc)
+            for tc in tool_calls
+        ]
         tool_results += [ToolResult(name, {}, False,
                                     f"This {name} call isn't valid JSON, so it wasn't run: {snippet!r}. Write it "
                                     f"as one JSON object, with real values in place of any <placeholders>.")
@@ -1110,5 +1177,5 @@ class SteeringAgent:
             steering_before=steering_before, steering_after=steering_after,
             tool_results=tool_results, degenerate_output=degenerate_output,
             degenerate_reason=degenerate_reason, repeated_output=repeated_output,
-            system_prompt=system_prompt, unsteered_nll=nll,
+            system_prompt=system_prompt, unsteered_nll=nll, prompt_tokens=prompt_len,
         )

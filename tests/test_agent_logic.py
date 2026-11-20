@@ -415,7 +415,7 @@ def test_tool_messages_include_failures_and_degeneration():
 
 # --- reports ---
 
-def _steered_step(agent, monkeypatch, output):
+def _steered_step(agent, monkeypatch, output, **options):
     """Run step() with generation stubbed out (no model needed)."""
     class FakeInputs:
         input_ids = torch.zeros(1, 1)
@@ -423,7 +423,16 @@ def _steered_step(agent, monkeypatch, output):
     monkeypatch.setattr(agent, "_encode", lambda msgs: FakeInputs())
     monkeypatch.setattr(agent, "_build_steering_context", lambda prompt_len: nullcontext())
     stub_generation(agent, monkeypatch, lambda *args: output)
-    return agent.step([{"role": "user", "content": "hi"}])
+    return agent.step([{"role": "user", "content": "hi"}], **options)
+
+
+def test_recovery_pauses_a_modulo_tool_before_execution(agent, monkeypatch):
+    output = '{"name":"steer","arguments":{"concept":"a","strength":4}}'
+    blocked = _steered_step(agent, monkeypatch, output, blocked_tools={"steer"})
+    assert not blocked.tool_results[0].ok and "recovery" in blocked.tool_results[0].message
+    assert not agent.active
+    assert _steered_step(agent, monkeypatch, output).tool_results[0].ok
+    assert "a" in agent.active
 
 
 REPORT_A = '{"name": "report", "arguments": {"concept": "a", "worked": true, "notes": "more playful"}}'
