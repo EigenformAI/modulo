@@ -48,6 +48,13 @@ messages += [{"role": "assistant", "content": result.raw_output}]
 messages += result.tool_messages()  # tool results back to the model
 ```
 
+Custom harnesses can pass an input-token limit with `prompt_budget`.
+Modulo then trims older conversation history while retaining its default
+steering instructions and tool rendering. To supply your own instructions,
+pass `steering_prompt`, a callable that receives the current steering status.
+Set `render_tool_schemas=False` if your harness describes tools in its prompt.
+
+
 If your harness has tools of its own, pass them with `agent.step(messages, tools=[...])`. Calls to them come back unrun in `result.other_tool_calls`. See [AGENTS.md](AGENTS.md#1-as-a-library-for-existing-agent-harnesses).
 
 ### As a standalone demo

@@ -559,6 +559,39 @@ def test_harness_system_prompt_is_merged(agent):
     assert "self-steering experiment" in full[0]["content"]
 
 
+
+def test_prompt_budget_keeps_default_steering_prompt_and_schemas(agent, monkeypatch):
+    rendered = []
+
+    class Inputs:
+        input_ids = torch.zeros(1, 12)
+
+        def to(self, _device):
+            return self
+
+    def render(_tokenizer, messages, tools=None):
+        rendered.append((messages[0]["content"], tools))
+        return "prompt"
+
+    agent.model = SimpleNamespace(device="cpu")
+    monkeypatch.setattr(A, "chat_prompt", render)
+    monkeypatch.setattr(A, "encode", lambda *args: Inputs())
+    stub_generation(agent, monkeypatch, lambda *args: "A new thought.")
+    messages = [{"role": "user", "content": "hi"}]
+    tools = [{"type": "function", "function": {"name": "search"}}]
+
+    result = agent.step(messages, tools=tools, prompt_budget=20)
+    assert result.prompt_tokens == 12
+    assert "self-steering experiment" in rendered[-1][0]
+    assert {t["function"]["name"] for t in rendered[-1][1]} >= {"search", "steer"}
+
+    agent.step(messages, tools=tools, steering_prompt=lambda status: f"Custom: {status}",
+               render_tool_schemas=False)
+    assert rendered[-1][0].startswith("Custom:") and rendered[-1][1] is None
+    agent.step(messages, tools=tools)
+    assert "self-steering experiment" in rendered[-1][0] and rendered[-1][1] is not None
+
+
 def test_degenerate_turn_regenerates_with_updated_prompt(agent, monkeypatch):
     """The unsteered retry must be built after the drops, so its prompt doesn't list them as active."""
     class FakeInputs:

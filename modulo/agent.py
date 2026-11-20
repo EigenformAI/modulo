@@ -21,7 +21,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Collection, Optional
+from typing import Callable, Collection, Optional
 
 import torch
 
@@ -534,6 +534,8 @@ class SteeringAgent:
         self.pass_through_unknown_tools = pass_through_unknown_tools
         self.rotate_created = rotate_created
         self._prompt_budget: Optional[int] = None
+        self._steering_prompt: Optional[Callable[[str], str]] = None
+        self._render_tool_schemas = True
         self._step_tools: Optional[list] = None  # the harness's tools for the current step
         self.menu_seed = menu_seed if menu_seed is not None else random.SystemRandom().randrange(2**31)
         self._menu_order: Optional[list[str]] = None  # fixed at the first prompt of the session
@@ -1016,14 +1018,8 @@ class SteeringAgent:
         return torch.nn.functional.cross_entropy(logits, out[0, prompt_len:]).item()
 
     def _full_messages(self, messages: list[dict]) -> list[dict]:
-        if self._prompt_budget is None:
-            sys_prompt = self.build_system_prompt()
-        else:
-            sys_prompt = (
-                "Steering changes your activations starting next turn. "
-                "Strengths decay each turn. Report after a vector stops acting. "
-                f"Current steering: {self.status()}"
-            )
+        sys_prompt = (self._steering_prompt(self.status()) if self._steering_prompt is not None
+                      else self.build_system_prompt())
         if messages and messages[0].get("role") == "system":
             # Merge the harness's own system prompt; many chat templates reject
             # or mishandle a second system message.
@@ -1035,7 +1031,7 @@ class SteeringAgent:
         # Some chat templates offer only tools passed as schemas; keep Modulo
         # equally discoverable when a harness supplies its own functions.
         tools = None
-        if self._step_tools and self._prompt_budget is None:
+        if self._step_tools and self._render_tool_schemas:
             named = tool_names(self._step_tools)
             tools = [*self._step_tools, *(schema for schema in MODULO_TOOL_SCHEMAS
                                           if schema["function"]["name"] not in named)]
@@ -1055,14 +1051,14 @@ class SteeringAgent:
             for item in history[start:]:
                 role = item["role"]
                 if role == "assistant" and (not tail or tail[-1]["role"] == "assistant"):
-                    tail.append({"role": "user", "content": "Continue your research."})
+                    tail.append({"role": "user", "content": "Continue."})
                 if role == "user" and tail and tail[-1]["role"] == "user":
                     tail[-1] = {"role": "user", "content": tail[-1]["content"] + "\n" + item["content"]}
                 else:
                     tail.append(item)
             if not tail or tail[0]["role"] != "user":
-                tail.insert(0, {"role": "user", "content": "Continue your research."})
-            return encode(self.tokenizer, chat_prompt(self.tokenizer, system + tail))
+                tail.insert(0, {"role": "user", "content": "Continue."})
+            return encode(self.tokenizer, chat_prompt(self.tokenizer, system + tail, tools=tools))
 
         # Search for the longest suffix within the rendered token budget.
         low, high = 0, len(starts) - 1
@@ -1082,18 +1078,19 @@ class SteeringAgent:
         tail = history[latest:]
         for item in reversed(tail):
             inputs = encode(self.tokenizer, chat_prompt(self.tokenizer, system + [
-                {"role": "user", "content": "Continue your research."},
+                {"role": "user", "content": "Continue."},
                 {"role": "assistant", "content": "Checking the last result."},
                 {"role": "tool", "content": item["content"]},
-            ]))
+            ], tools=tools))
             if inputs.input_ids.shape[1] <= self._prompt_budget:
                 return inputs.to(self.model.device)
-        raise ValueError("Mailbox prompt budget is too small for the system prompt and latest result.")
+        raise ValueError("Prompt budget is too small for the system prompt and latest result.")
 
     def step(self, messages: list[dict], max_new_tokens: int = 300,
              temperature: float = 0.7, top_p: float = 0.9, tools: Optional[list] = None,
-             *, prompt_budget: Optional[int] = None,
-             blocked_tools: Collection[str] = ()) -> StepResult:
+             *, prompt_budget: Optional[int] = None, blocked_tools: Collection[str] = (),
+             steering_prompt: Optional[Callable[[str], str]] = None,
+             render_tool_schemas: bool = True) -> StepResult:
         """Run one turn: build prompt, generate (steered), parse tool calls, apply them, decay.
 
         Args:
@@ -1101,15 +1098,19 @@ class SteeringAgent:
             max_new_tokens, temperature, top_p: generation params
             tools: the harness's own tools (JSON schemas or functions). Calls to
                 them are returned in StepResult.other_tool_calls, not run.
-            prompt_budget: opt into compact steering instructions and a rendered
-                input-token limit. The harness supplies its own tool instructions.
-                Without a budget, schemas are passed to the chat template.
+            prompt_budget: limit rendered input tokens by trimming conversation history.
             blocked_tools: Modulo tool names to reject before execution on this turn.
+            steering_prompt: optional function of the current steering status that
+                replaces Modulo's default instructions for this turn.
+            render_tool_schemas: include tool schemas in the chat template. Set
+                False when the harness supplies its own tool instructions.
 
         Returns: StepResult with prose, raw output, tool calls/results, and steering state
         """
         self._step_tools = tools
         self._prompt_budget = prompt_budget
+        self._steering_prompt = steering_prompt
+        self._render_tool_schemas = render_tool_schemas
         full = self._full_messages(messages)
         system_prompt = full[0]["content"]
         inputs = self._encode(messages)
